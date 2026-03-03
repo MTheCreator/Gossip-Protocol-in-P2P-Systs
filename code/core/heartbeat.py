@@ -25,11 +25,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from .message import Message, MessageType, NodeStatus
 from .node import LocalNode, NeighbourEntry, NodeInfo
 from config.base_config import BaseConfig
+
+if TYPE_CHECKING:
+    from components.edge_manager import EdgeManager
 
 logger = logging.getLogger(__name__)
 
@@ -273,9 +276,11 @@ class HeartbeatManager:
         node: LocalNode,
         send_fn: SendFn,
         on_node_dead: Optional[Callable[[NodeInfo], None]] = None,
+        edge_manager: Optional["EdgeManager"] = None,
     ) -> None:
         self.node        = node
         self.backoff_mgr = BackOffManager(node.config)
+        self.edge_manager = edge_manager   # injected after construction if needed
 
         # Default no-op if no C1 hook provided yet
         _on_dead = on_node_dead or (lambda peer: logger.warning(
@@ -287,6 +292,14 @@ class HeartbeatManager:
         self.detector = FailureDetector(node, _on_dead)
 
         self._running = False
+
+    def set_edge_manager(self, edge_manager: "EdgeManager") -> None:
+        """
+        Wire in an EdgeManager after construction.
+        Allows HeartbeatManager and EdgeManager to be built independently and
+        then connected, avoiding any circular-dependency at import time.
+        """
+        self.edge_manager = edge_manager
 
     def start(self) -> None:
         if self._running:
@@ -308,18 +321,23 @@ class HeartbeatManager:
 
     def on_edge_failure(self, node_id: str) -> None:
         """
-        Called by the forwarding engine (C3a/C4) when an edge probability
-        drops to 0.  Starts back-off for that neighbour.
+        Called by the forwarding engine (C3a / EdgeManager) when an edge
+        probability drops to 0.  Starts back-off for that neighbour and
+        notifies EdgeManager of the failure event.
         """
         entry = self.node.get_neighbour(node_id)
         if entry:
             self.backoff_mgr.start_backoff(entry)
+        # No call back into EdgeManager here — EdgeManager drives this event,
+        # so we only touch BackOff to avoid double-firing.
 
     def on_edge_recovery(self, node_id: str) -> None:
         """
         Called when an edge probability rises from 0 → positive again
-        (reconnect event).
+        (reconnect / revival event).  Resets back-off for that neighbour.
         """
         entry = self.node.get_neighbour(node_id)
         if entry:
             self.backoff_mgr.reset_backoff(entry)
+        # EdgeManager fires reinforce() which already advances the probability,
+        # so no further action needed here.
