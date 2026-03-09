@@ -193,7 +193,7 @@ class FailureDetector(threading.Thread):
 
         for entry in dead_nodes:
             self.node.mark_dead(entry.info.node_id)
-            # Fire the re-discovery callback (wired to C1 / Kademlia)
+            # Fire the re-discovery callback (wired to C1 / PeerDiscovery)
             try:
                 self.on_node_dead(entry.info)
             except Exception as exc:

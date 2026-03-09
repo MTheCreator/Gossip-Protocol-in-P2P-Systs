@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package gossip;
+
+// A single envelope for all gossip protocol messages.
+// The payload is the JSON-serialised core.Message (same format as UDP).
+// This keeps the proto simple and consistent with the rest of the system.
+
+service GossipService {
+  // Send a message to this node (unary RPC).
+  rpc SendMessage (GossipEnvelope) returns (Ack);
+}
+
+message GossipEnvelope {
+  bytes payload = 1;       // Message.to_bytes() (JSON)
+  string sender_id = 2;    // Node ID of the sender (for quick routing)
+  string sender_host = 3;  // Sender's host address
+  int32  sender_port = 4;  // Sender's port
+}
+
+message Ack {
+  bool   success = 1;
+  string error   = 2;      // Empty if success=true
+}

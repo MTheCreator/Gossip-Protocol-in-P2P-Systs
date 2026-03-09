@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum, auto
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +84,9 @@ class MessageType(Enum):
     HEARTBEAT     = auto()
     HEARTBEAT_ACK = auto()
 
-    # Peer discovery protocol (C1 — Kademlia)
-    FIND_NODE     = auto()
-    FOUND_NODES   = auto()
+    # Peer discovery protocol (C1)
+    PEER_LIST_REQUEST  = auto()   # "Give me your known peers"
+    PEER_LIST_RESPONSE = auto()   # Response with list of peer dicts
 
     # Control / management
     JOIN          = auto()
@@ -231,4 +231,15 @@ class MessageFactory:
         return self.create(
             MessageType.HEARTBEAT_ACK,
             metadata={"ack_for": original.msg_id},
+        )
+
+    def peer_list_request(self) -> Message:
+        """Request the peer list from a remote node."""
+        return self.create(MessageType.PEER_LIST_REQUEST)
+
+    def peer_list_response(self, peers: List[Dict[str, Any]]) -> Message:
+        """Respond with our known peer list."""
+        return self.create(
+            MessageType.PEER_LIST_RESPONSE,
+            content=peers,
         )

@@ -3,7 +3,7 @@ Base configuration shared across all transport backends.
 Tune these values per environment (simulation vs real deployment).
 """
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import List, Literal
 
 
 @dataclass
@@ -39,10 +39,25 @@ class GossipConfig:
 
 
 @dataclass
+class DiscoveryConfig:
+    """
+    Peer-discovery parameters (C1).
+
+    Priority: peers.json cache → hardcoded seeds → peer exchange.
+    """
+    peer_cache_file: str = "peers.json"          # Path to local peer cache
+    peer_cache_max: int = 20                      # Max peers to remember
+    seed_nodes: List[str] = field(default_factory=lambda: ["127.0.0.1:5000"])
+    discovery_timeout: float = 3.0                # Timeout per connection attempt (s)
+    peer_exchange_interval: float = 30.0          # Background refresh interval (s)
+
+
+@dataclass
 class BaseConfig:
     transport: Literal["grpc", "udp"] = "grpc"
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     gossip: GossipConfig = field(default_factory=GossipConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     bootstrap_host: str = "127.0.0.1"
     bootstrap_port: int = 5000
     node_id_bits: int = 160        # SHA-1 sized node IDs (Kademlia compatible)
