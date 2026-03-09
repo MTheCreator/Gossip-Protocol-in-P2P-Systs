@@ -1,11 +1,7 @@
 """
-simulation.py  —  Integration test: Heartbeat + EdgeManager (code/ framework)
-==============================================================================
+simulation.py  —  Integration test: Heartbeat + EMA EdgeManager (code/ framework)
+==================================================================================
 Elghali Benjelloun — Gossip Protocol Project
-
-This script is the counterpart to src/simulation_stub.py, but uses the full
-code/ framework (LocalNode, HeartbeatManager, EdgeManager, BaseConfig) instead
-of the standalone src/ classes.
 
 Scenario
 --------
@@ -15,9 +11,14 @@ Scenario
     - Sends PING to both; node-B replies, node-C never does
     - node-C is marked SUSPECTED after 3 * delta_t, then DEAD after 6 * delta_t
 
-  EdgeManager (forwarding probability):
-    - Simulates a forwarding engine that reinforces edge A→B every 1.5 * delta_t
-    - Edge A→C gets no reinforcement → decays to 0 → on_edge_died fires
+  EdgeManager (EMA reliability scoring):
+    - Simulates message sends: B succeeds, C always fails
+    - Edge A→B reliability stays high (reinforced by successes)
+    - Edge A→C reliability drops to 0 (penalised by failures) → on_edge_died fires
+
+  EMA formula:
+    reliability_score = λ * old_score + (1 - λ) * outcome
+    where outcome = 1.0 (success) or 0.0 (failure)
 
 Run with:
     cd code/
@@ -33,7 +34,7 @@ import threading
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config.base_config import BaseConfig, HeartbeatConfig, GossipConfig
+from config.base_config import BaseConfig, HeartbeatConfig, GossipConfig, EdgeReliabilityConfig
 from core.node import LocalNode, NodeInfo
 from core.heartbeat import HeartbeatManager
 from core.message import Message, MessageType
@@ -49,12 +50,13 @@ log = logging.getLogger(__name__)
 
 # ── Simulation parameters ─────────────────────────────────────────────────────
 DELTA_T   = 0.5    # heartbeat interval (fast for demo)
+LAMBDA    = 0.7    # EMA smoothing (lower = reacts faster = better for short sim)
 SIM_TIME  = (6 * DELTA_T) + 3   # long enough to see the DEAD transition
 
 def run_simulation() -> None:
     log.info("=" * 60)
-    log.info("   Gossip Protocol — Integrated Simulation (code/ framework)")
-    log.info(f"   ∆t={DELTA_T}s  T_suspect={3*DELTA_T}s  T_dead={6*DELTA_T}s")
+    log.info("   Gossip Protocol — EMA Reliability Simulation")
+    log.info(f"   ∆t={DELTA_T}s  λ={LAMBDA}  T_suspect={3*DELTA_T}s  T_dead={6*DELTA_T}s")
     log.info("=" * 60)
 
     events: list = []   # record state transitions for assertions
@@ -73,6 +75,12 @@ def run_simulation() -> None:
             backoff_max=60.0,
             backoff_multiplier=2.0,
         ),
+        edge_reliability=EdgeReliabilityConfig(
+            lambda_ema=LAMBDA,
+            dead_threshold=0.1,
+            revival_threshold=0.2,
+            initial_score=0.5,
+        ),
     )
 
     # ── Build node-A ───────────────────────────────────────────────────
@@ -89,22 +97,17 @@ def run_simulation() -> None:
     def on_node_dead(peer: NodeInfo) -> None:
         log.error("  💀 CALLBACK: %s is DEAD → trigger C1 re-discovery!", peer.node_id[:8])
         events.append(("dead", peer.node_id))
-        # A dead node means its edge is also gone.  Since LocalNode.mark_dead()
-        # removes the NeighbourEntry immediately, EdgeManager's decay loop
-        # will never see it again — so we fire on_edge_died here explicitly.
-        log.error("  🔌 CALLBACK: Edge → %s DIED (peer declared dead)", peer.node_id[:8])
-        events.append(("edge_died", peer.node_id))
-        hb.on_edge_failure(peer.node_id)   # → BackOffManager.start_backoff()
+        hb.on_edge_failure(peer.node_id)
 
     def on_edge_died(node_id: str) -> None:
-        log.error("  🔌 CALLBACK: Edge → %s DIED → back-off + re-discovery", node_id[:8])
+        log.error("  🔌 CALLBACK: Edge → %s DIED (reliability too low)", node_id[:8])
         events.append(("edge_died", node_id))
-        hb.on_edge_failure(node_id)   # notify HeartbeatManager → BackOff
+        hb.on_edge_failure(node_id)
 
     def on_edge_revived(node_id: str) -> None:
         log.info("  ⚡ CALLBACK: Edge → %s REVIVED", node_id[:8])
         events.append(("edge_revived", node_id))
-        hb.on_edge_recovery(node_id)  # notify HeartbeatManager → reset BackOff
+        hb.on_edge_recovery(node_id)
 
     # ── No-op send function (no real socket here) ──────────────────────
     def send_fn(peer: NodeInfo, msg: Message) -> None:
@@ -117,21 +120,20 @@ def run_simulation() -> None:
         on_node_dead=on_node_dead,
     )
 
-    # ── Build EdgeManager ──────────────────────────────────────────────
+    # ── Build EdgeManager (EMA-based) ──────────────────────────────────
     em = EdgeManager(
         node=node_a,
-        reinforce_step=0.08,
-        decay_factor=0.90,      # aggressive decay so we see effect quickly
-        dead_threshold=0.05,
-        enable_noise=False,
+        lambda_ema=LAMBDA,
+        dead_threshold=0.1,
+        revival_threshold=0.2,
+        initial_score=0.5,
         on_edge_died=on_edge_died,
         on_edge_revived=on_edge_revived,
     )
-    # Set initial probabilities (node already in neighbour table)
     em.add_edge(peer_b.node_id, initial_prob=0.5)
     em.add_edge(peer_c.node_id, initial_prob=0.5)
 
-    # Cross-wire (optional — for back-off calls from EdgeManager to HeartbeatManager)
+    # Cross-wire
     hb.set_edge_manager(em)
 
     # ── Start both managers ────────────────────────────────────────────
@@ -141,21 +143,24 @@ def run_simulation() -> None:
     # ── Simulate node-B sending heartbeats (stays alive) ──────────────
     def node_b_heartbeat_loop() -> None:
         while True:
-            msg = node_a.factory.heartbeat()
-            # Override sender_id to look like it came from B
-            object.__setattr__(msg, "sender_id", peer_b.node_id)  # type: ignore[arg-type]
             node_a.record_heartbeat(peer_b.node_id)
             time.sleep(DELTA_T)
 
     b_thread = threading.Thread(target=node_b_heartbeat_loop, daemon=True)
     b_thread.start()
 
-    # ── Simulate forwarding engine reinforcing edge A→B ────────────────
+    # ── Simulate forwarding engine: B succeeds, C fails ────────────────
     def forward_engine_sim() -> None:
         while True:
-            em.reinforce(peer_b.node_id)   # B is active
-            # node-C gets no reinforcement → will decay and die
-            time.sleep(DELTA_T * 1.5)
+            # B: successful delivery → reinforce
+            em.record_outcome(peer_b.node_id, success=True)
+
+            # C: failed delivery → penalise
+            entry_c = node_a.get_neighbour(peer_c.node_id)
+            if entry_c:
+                em.record_outcome(peer_c.node_id, success=False)
+
+            time.sleep(DELTA_T * 0.5)
 
     fwd_thread = threading.Thread(target=forward_engine_sim, daemon=True)
     fwd_thread.start()
@@ -168,9 +173,11 @@ def run_simulation() -> None:
     log.info("\n" + "=" * 60)
     log.info("  FINAL NEIGHBOUR STATES (node-A perspective)")
     for entry in node_a.all_neighbours():
-        log.info("    %s: %s", entry.info.node_id[:8], entry.status.value)
+        log.info("    %s: status=%s, reliability=%.3f, edge_prob=%.3f",
+                 entry.info.node_id[:8], entry.status.value,
+                 entry.reliability_score, entry.edge_prob)
 
-    log.info("\n  FINAL EDGE PROBABILITIES")
+    log.info("\n  FINAL EDGE PROBABILITIES (via EdgeManager)")
     for nid, prob in em.all_edges().items():
         log.info("    %s: p = %.3f", nid[:8], prob)
 
@@ -186,7 +193,7 @@ def run_simulation() -> None:
 
     assert "dead" in event_types, "FAIL: node-C should have been declared DEAD"
     assert peer_c.node_id in event_ids, f"FAIL: dead event should name node-C ({peer_c.node_id[:8]})"
-    assert "edge_died" in event_types, "FAIL: edge A→C should have died"
+    assert "edge_died" in event_types, "FAIL: edge A→C should have died (reliability < threshold)"
 
     p_b = em.get_probability(peer_b.node_id)
     assert p_b is not None and p_b > 0.5, \

@@ -86,6 +86,7 @@ class NeighbourEntry:
     info: NodeInfo
     edge_prob: float              = 1.0
     status: NodeStatus            = NodeStatus.ALIVE
+    reliability_score: float      = 1.0   # EMA of delivery outcomes [0.0–1.0]
     last_heartbeat: float         = field(default_factory=time.time)
     missed_beats: int             = 0
     backoff_delay: float          = 1.0

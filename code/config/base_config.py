@@ -52,12 +52,28 @@ class DiscoveryConfig:
     peer_exchange_interval: float = 30.0          # Background refresh interval (s)
 
 
+
+@dataclass
+class EdgeReliabilityConfig:
+    """
+    EMA-based edge reliability scoring parameters.
+
+    reliability_score = λ * old_score + (1 - λ) * outcome
+    where outcome ∈ {0.0 (failure), 1.0 (success)}
+    """
+    lambda_ema: float = 0.8          # EMA smoothing factor (0 < λ < 1)
+    dead_threshold: float = 0.1      # below this → edge is dead
+    revival_threshold: float = 0.2   # above this after dead → edge revived
+    initial_score: float = 1.0       # starting reliability for new edges
+
+
 @dataclass
 class BaseConfig:
     transport: Literal["grpc", "udp"] = "grpc"
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     gossip: GossipConfig = field(default_factory=GossipConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    edge_reliability: EdgeReliabilityConfig = field(default_factory=EdgeReliabilityConfig)
     bootstrap_host: str = "127.0.0.1"
     bootstrap_port: int = 5000
     node_id_bits: int = 160        # SHA-1 sized node IDs (Kademlia compatible)

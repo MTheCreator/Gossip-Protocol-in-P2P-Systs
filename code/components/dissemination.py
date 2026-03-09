@@ -213,13 +213,17 @@ class DisseminationEngine:
                 logger.warning(
                     "[Dissemination] Send to %s failed: %s", nid[:8], exc,
                 )
+                # Record failure outcome for EMA reliability scoring
+                if self.edge_manager:
+                    self.edge_manager.record_outcome(nid, success=False)
                 continue
+
+            # Record the delivery outcome (success or failure)
+            if self.edge_manager:
+                self.edge_manager.record_outcome(nid, success=success)
 
             if success:
                 self._forwarded += 1
-                # Reinforce the edge on successful forward
-                if self.edge_manager:
-                    self.edge_manager.reinforce(nid)
 
     # ------------------------------------------------------------------
     # Stats
