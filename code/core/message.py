@@ -2,13 +2,17 @@
 core/message.py  —  C2: Message Modeling
 =========================================
 Defines:
-  - LamportClock  : thread-safe monotonic counter for total ordering
-  - MessageType   : enum covering all message kinds in the system
-  - Message       : the canonical message struct exchanged between nodes
-  - MessageFactory: convenience factory that stamps messages with clock values
+  - LamportClock      : thread-safe monotonic counter for total ordering
+  - MessageType       : enum covering all message kinds in the system
+  - Message           : the canonical message struct exchanged between nodes
+  - MessageFactory    : convenience factory that stamps messages with clock values
+  - OutOfOrderBuffer  : per-sender buffer that holds and delivers messages
+                        in total (Lamport) order
 
 Design decisions implemented (see task_division.pdf):
   * Total ordering enforced via Lamport timestamps.
+  * Out-of-order messages are held in a min-heap until the expected counter
+    is available, then flushed in order.
   * Extensible 'metadata' dict for additional fields without breaking the interface.
   * Serialisation to/from plain dict so both gRPC (protobuf payload) and UDP
     (JSON-over-datagram) transports can encode as they see fit.
@@ -17,13 +21,14 @@ Design decisions implemented (see task_division.pdf):
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +183,162 @@ class Message:
             f"sender={self.sender_id[:8]}…, lamport={self.lamport_ts}, "
             f"channel={self.channel!r})"
         )
+
+    # Needed so Message objects can be stored in a heapq (min-heap).
+    # We order by (lamport_ts, counter) to break ties deterministically.
+    def __lt__(self, other: "Message") -> bool:
+        return (self.lamport_ts, self.counter) < (other.lamport_ts, other.counter)
+
+    def __le__(self, other: "Message") -> bool:
+        return (self.lamport_ts, self.counter) <= (other.lamport_ts, other.counter)
+
+
+# ---------------------------------------------------------------------------
+# Out-of-Order Buffer
+# ---------------------------------------------------------------------------
+
+class OutOfOrderBuffer:
+    """
+    Per-sender buffer that enforces total-order delivery using Lamport
+    timestamps and per-sender sequence counters.
+
+    How it works
+    ------------
+    Every sender produces messages with a strictly increasing ``counter``
+    (1, 2, 3, …).  The buffer tracks the *next expected counter* for each
+    sender.  Incoming messages whose counter matches the expectation are
+    delivered immediately; messages that arrive early are held in a
+    per-sender min-heap and flushed once the gap is filled.
+
+    Delivery order within a single sender is counter-order.
+    Across senders, the ``deliver_callback`` is called in the order
+    messages become deliverable (i.e. as gaps close).
+
+    Parameters
+    ----------
+    deliver_callback:
+        Called with each ``Message`` in delivery order.
+        Must be thread-safe if ``receive()`` is called from multiple threads.
+    max_buffer_size:
+        Maximum number of buffered (out-of-order) messages per sender before
+        the buffer force-flushes to avoid unbounded memory growth.
+        Defaults to 1 000.
+
+    Thread safety
+    -------------
+    A single lock serialises all mutations.  The deliver_callback is invoked
+    while the lock is held, so it must not call back into the buffer.
+
+    Usage example
+    -------------
+    >>> def on_deliver(msg):
+    ...     print("delivered", msg.counter)
+    >>> buf = OutOfOrderBuffer(on_deliver)
+    >>> buf.receive(msg3)   # buffered — gap at 1 and 2
+    >>> buf.receive(msg1)   # delivered immediately; msg2 still missing
+    >>> buf.receive(msg2)   # delivered; then msg3 flushed automatically
+    """
+
+    def __init__(
+        self,
+        deliver_callback: Callable[[Message], None],
+        max_buffer_size: int = 1_000,
+    ) -> None:
+        self._deliver = deliver_callback
+        self._max_buf = max_buffer_size
+        self._lock    = threading.Lock()
+
+        # next expected counter per sender_id
+        self._next_expected: Dict[str, int] = {}
+
+        # min-heap of buffered messages per sender_id
+        self._pending: Dict[str, List[Message]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def receive(self, msg: Message) -> None:
+        """
+        Accept an incoming message.
+
+        - If it is the next expected message from its sender, deliver it
+          and then flush any consecutive messages that were waiting.
+        - Otherwise, buffer it for later delivery.
+        - If the buffer for this sender exceeds *max_buffer_size*, force-
+          flush all buffered messages in order (gap tolerance exceeded).
+        """
+        with self._lock:
+            sender = msg.sender_id
+
+            # Initialise state for a new sender on first contact
+            if sender not in self._next_expected:
+                self._next_expected[sender] = 1
+                self._pending[sender]       = []
+
+            expected = self._next_expected[sender]
+
+            if msg.counter == expected:
+                # Happy path: deliver and flush any waiting messages
+                self._deliver_and_advance(sender, msg)
+                self._flush(sender)
+
+            elif msg.counter > expected:
+                # Future message: buffer it
+                heapq.heappush(self._pending[sender], msg)
+
+                # Safety valve: force-flush if buffer grows too large
+                if len(self._pending[sender]) >= self._max_buf:
+                    self._force_flush(sender)
+
+            # msg.counter < expected → duplicate or already delivered; drop silently
+
+    def reset_sender(self, sender_id: str) -> None:
+        """
+        Discard all buffered state for *sender_id*.
+
+        Call this when C1 signals that a peer has been replaced (re-discovery
+        after failure) so stale counters don't block the new peer's messages.
+        """
+        with self._lock:
+            self._next_expected.pop(sender_id, None)
+            self._pending.pop(sender_id, None)
+
+    def pending_counts(self) -> Dict[str, int]:
+        """Return the number of buffered (undelivered) messages per sender."""
+        with self._lock:
+            return {s: len(q) for s, q in self._pending.items()}
+
+    # ------------------------------------------------------------------
+    # Internal helpers  (called with self._lock already held)
+    # ------------------------------------------------------------------
+
+    def _deliver_and_advance(self, sender: str, msg: Message) -> None:
+        """Deliver one message and bump the expected counter."""
+        self._deliver(msg)
+        self._next_expected[sender] = msg.counter + 1
+
+    def _flush(self, sender: str) -> None:
+        """
+        Deliver consecutive buffered messages whose counter now matches
+        the expected value.
+        """
+        heap = self._pending[sender]
+        while heap and heap[0].counter == self._next_expected[sender]:
+            nxt = heapq.heappop(heap)
+            self._deliver_and_advance(sender, nxt)
+
+    def _force_flush(self, sender: str) -> None:
+        """
+        Deliver *all* buffered messages for *sender* in counter order,
+        skipping the gap-filling requirement.  Used as a safety valve.
+        """
+        heap = self._pending[sender]
+        # Sort is implicit: heap invariant means heappop gives min order
+        while heap:
+            msg = heapq.heappop(heap)
+            self._deliver(msg)
+            self._next_expected[sender] = msg.counter + 1
 
 
 # ---------------------------------------------------------------------------
