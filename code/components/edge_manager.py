@@ -4,23 +4,25 @@ components/edge_manager.py  —  C4: Edge Probability Update (EMA-based)
 Elghali Benjelloun — Gossip Protocol Project
 
 Manages per-edge forwarding probabilities using an **Exponential Moving
-Average (EMA)** of message delivery outcomes.
+Average (EMA)** that blends TWO continuous signals:
 
-Formula (on every send attempt):
-    reliability_score = λ * old_score + (1 - λ) * outcome
-    where outcome ∈ {1.0 (success), 0.0 (failure)}
+  1. Reliability (delivery outcome):  1.0 = success,  0.0 = failure
+  2. Congestion  (from HeartbeatManager): 1.0 = clear,  0.0 = severe
 
-The reliability_score is kept in sync with NeighbourEntry.edge_prob so
-the probabilistic forwarding in DisseminationEngine automatically
-favors reliable connections.
+Formula (on every send attempt via record_outcome):
+    congestion  = get_congestion_fn(peer_id)       # from HeartbeatManager
+    combined    = w_rel * outcome + w_cong * congestion
+    score_new   = λ * score_old + (1 - λ) * combined
+
+This means:
+  - Even a successful send on a congested link will lower p_ij
+  - A failed send on a clear link penalises less than on a congested one
+  - Recovery requires both successful delivery AND clear congestion
 
 Integration points:
-  - Call `em.record_outcome(node_id, success)` from the dissemination
-    engine after every send attempt.
-  - Convenience: `em.reinforce(node_id)` = record_outcome(…, True)
-  - Convenience: `em.penalise(node_id)`  = record_outcome(…, False)
-  - Register `on_edge_died`   → triggers C1 peer re-discovery callback.
-  - Register `on_edge_revived`→ optional book-keeping / logging.
+  - DisseminationEngine calls em.record_outcome(node_id, success)
+  - HeartbeatManager provides get_congestion(peer_id) → float [0,1]
+  - on_edge_died callback → triggers C1 peer re-discovery
 """
 
 from __future__ import annotations
@@ -72,6 +74,9 @@ class EdgeManager:
         dead_threshold: Optional[float] = None,
         revival_threshold: Optional[float] = None,
         initial_score: Optional[float] = None,
+        w_rel: float = 0.7,
+        w_cong: float = 0.3,
+        get_congestion_fn: Optional[Callable[[str], float]] = None,
         on_edge_died: Optional[Callable[[str], None]] = None,
         on_edge_revived: Optional[Callable[[str], None]] = None,
         # Legacy compat — accepted but ignored
@@ -88,6 +93,14 @@ class EdgeManager:
         self._dead_threshold = dead_threshold if dead_threshold is not None else rel_cfg.dead_threshold
         self._revival_threshold = revival_threshold if revival_threshold is not None else rel_cfg.revival_threshold
         self._initial_score = initial_score if initial_score is not None else rel_cfg.initial_score
+
+        # Weights for blending reliability + congestion
+        self._w_rel  = w_rel
+        self._w_cong = w_cong
+
+        # Congestion data source (injected from HeartbeatManager)
+        # Returns float in [0.0, 1.0]; defaults to 1.0 (clear) if not wired
+        self._get_congestion = get_congestion_fn or (lambda nid: 1.0)
 
         self._on_edge_died = on_edge_died or (lambda nid: None)
         self._on_edge_revived = on_edge_revived or (lambda nid: None)
@@ -148,23 +161,28 @@ class EdgeManager:
         """
         Record the outcome of a message send attempt.
 
-        Updates the reliability score using the EMA formula:
-            score = λ * old_score + (1 - λ) * outcome
+        Blends TWO signals into the EMA update:
+          1. Reliability: outcome ∈ {0.0, 1.0}
+          2. Congestion:  get_congestion(peer_id) ∈ [0.0, 1.0]
 
-        Also:
-          - Keeps edge_prob in sync with reliability_score
-          - Detects edge death (score < dead_threshold)
-          - Detects edge revival (score > revival_threshold after death)
+        Formula:
+          combined  = w_rel * outcome + w_cong * congestion
+          new_score = λ * old_score + (1 - λ) * combined
+
+        Also detects edge death / revival.
         """
         entry = self.node.get_neighbour(node_id)
         if entry is None:
             return
 
         outcome = 1.0 if success else 0.0
+        congestion = self._get_congestion(node_id)
+
+        combined = self._w_rel * outcome + self._w_cong * congestion
 
         with self._lock:
             old_score = entry.reliability_score
-            new_score = self._lambda * old_score + (1.0 - self._lambda) * outcome
+            new_score = self._lambda * old_score + (1.0 - self._lambda) * combined
 
             # Clamp to [0.0, 1.0]
             new_score = max(0.0, min(1.0, new_score))
@@ -173,8 +191,9 @@ class EdgeManager:
             entry.edge_prob = new_score  # keep forwarding probability in sync
 
             logger.debug(
-                "[EdgeMgr] %s outcome=%s (score: %.3f → %.3f)",
+                "[EdgeMgr] %s outcome=%s cong=%.2f combined=%.3f (score: %.3f → %.3f)",
                 node_id[:8], "OK" if success else "FAIL",
+                congestion, combined,
                 old_score, new_score,
             )
 
