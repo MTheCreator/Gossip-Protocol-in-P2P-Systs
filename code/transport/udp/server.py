@@ -65,19 +65,22 @@ class UDPServer:
 
         self._send_fn = send_fn
 
-        # Edge manager
-        self.edge_manager = EdgeManager(
-            node=self.node,
-            on_edge_died=lambda nid: self.discovery.trigger_rediscovery(),
-        )
-
-        # Heartbeat manager
+        # Heartbeat manager (created first — provides congestion data)
         self.heartbeat = HeartbeatManager(
             node=self.node,
             send_fn=send_fn,
             on_node_dead=lambda peer: self.discovery.trigger_rediscovery(peer),
-            edge_manager=self.edge_manager,
         )
+
+        # Edge manager (wired to heartbeat congestion + discovery callback)
+        self.edge_manager = EdgeManager(
+            node=self.node,
+            on_edge_died=lambda nid: self.discovery.trigger_rediscovery(),
+            get_congestion_fn=self.heartbeat.get_congestion,
+        )
+
+        # Now wire edge_manager back into heartbeat
+        self.heartbeat.edge_manager = self.edge_manager
 
         # Discovery
         self.discovery = PeerDiscovery(
