@@ -1,5 +1,5 @@
 # Congestion-Aware Edge Probability in Gossip Protocols
-**Component C4: Edge Updates (Elghali Benjelloun)**
+**Component C4: Edge Updates**
 
 ## Overview
 This document justifies the algorithmic choices for the Edge Manager's probability updates (C4). The edge weight $p_{ij}$ evolves based on **two continuous signals**: message delivery reliability and network congestion — unified into a single EMA formula.
