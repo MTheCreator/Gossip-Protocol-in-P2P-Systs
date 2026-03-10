@@ -181,7 +181,7 @@ def test_edge_reinforcement():
         send_log.append(peer.node_id)
         return True
 
-    em = EdgeManager(node=node, reinforce_step=0.1, decay_factor=1.0)
+    em = EdgeManager(node=node, lambda_ema=0.8)
     engine = DisseminationEngine(node, send_fn, edge_manager=em)
 
     peer = _make_peer(8400)
@@ -194,17 +194,17 @@ def test_edge_reinforcement():
     # Verify the message was actually sent
     assert peer.node_id in send_log, "Message should have been sent to peer"
 
-    # After reinforce(+0.1) the prob is min(1.0, 1.0+0.1) = 1.0
-    # But the reinforce WAS called. Let's test with a lower prob directly.
-    # Use a second approach: manually reinforce and check
-    em2 = EdgeManager(node=node, reinforce_step=0.1, decay_factor=1.0)
+    # Test EMA reinforcement directly: start at 0.3, reinforce (success=True)
+    # EMA: 0.8 * 0.3 + 0.2 * 1.0 = 0.44
+    em2 = EdgeManager(node=node, lambda_ema=0.8)
     peer2 = _make_peer(8401)
     node.add_neighbour(peer2, edge_prob=0.3)
     em2.add_edge(peer2.node_id, initial_prob=0.3)
     em2.reinforce(peer2.node_id)
     new_prob = em2.get_probability(peer2.node_id)
-    assert new_prob is not None and abs(new_prob - 0.4) < 0.001, \
-        f"Edge should be reinforced to 0.4, got {new_prob}"
+    expected = 0.8 * 0.3 + 0.2 * 1.0  # 0.44
+    assert new_prob is not None and abs(new_prob - expected) < 0.001, \
+        f"Edge should be reinforced to {expected}, got {new_prob}"
 
     print("[PASS] test_edge_reinforcement")
 

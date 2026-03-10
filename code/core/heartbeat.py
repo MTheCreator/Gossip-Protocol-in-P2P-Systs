@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from .message import Message, MessageType, NodeStatus
 from .node import LocalNode, NeighbourEntry, NodeInfo
@@ -281,17 +281,51 @@ class HeartbeatManager:
         self.node        = node
         self.backoff_mgr = BackOffManager(node.config)
         self.edge_manager = edge_manager   # injected after construction if needed
+        self.send_fn     = send_fn
+
+        # Congestion tracking (TCP Vegas style)
+        # pending_pings: timestamps of sent heartbeats awaiting ACK
+        # ema_rtt: smoothed baseline RTT per peer
+        # congestion_scores: continuous score per peer, 0.0=congested → 1.0=clear
+        self.pending_pings: Dict[str, float] = {}
+        self.ema_rtt: Dict[str, float] = {}
+        self.congestion_scores: Dict[str, float] = {}
+        self.rtt_alpha = 0.125
+        self._rtt_lock = threading.Lock()
 
         # Default no-op if no C1 hook provided yet
         _on_dead = on_node_dead or (lambda peer: logger.warning(
             "[HBM] node dead, no re-discovery hook registered: %s", peer
         ))
 
-        self.sender   = HeartbeatSender(node, send_fn)
+        self.sender   = HeartbeatSender(node, self._wrapped_send_fn)
         self.receiver = HeartbeatReceiver(node, send_fn)
         self.detector = FailureDetector(node, _on_dead)
 
         self._running = False
+
+    def _wrapped_send_fn(self, peer: NodeInfo, msg: Message) -> None:
+        """Intercept outgoing heartbeats to record send time for RTT calculation."""
+        if msg.msg_type == MessageType.HEARTBEAT:
+            with self._rtt_lock:
+                self.pending_pings[peer.node_id] = time.time()
+        self.send_fn(peer, msg)
+
+    def get_congestion(self, peer_id: str) -> float:
+        """
+        Return the current congestion score for a peer.
+
+        Returns a value in [0.0, 1.0]:
+            1.0 = link is clear (RTT matches baseline)
+            0.5 = link is moderately congested (RTT = 2x baseline)
+            0.1 = link is severely congested (RTT = 10x baseline)
+            1.0 = default if no data yet (assume clear)
+
+        The EdgeManager calls this during record_outcome() to blend
+        congestion into the probability update.
+        """
+        with self._rtt_lock:
+            return self.congestion_scores.get(peer_id, 1.0)
 
     def set_edge_manager(self, edge_manager: "EdgeManager") -> None:
         """
@@ -318,6 +352,37 @@ class HeartbeatManager:
     def handle_incoming(self, msg: Message, sender_info: Optional[NodeInfo] = None) -> None:
         """Convenience passthrough — transports call this on every heartbeat message."""
         self.receiver.handle(msg, sender_info)
+
+        # RTT Tracking on ACK → update congestion_score
+        if msg.msg_type == MessageType.HEARTBEAT_ACK:
+            sender_id = msg.sender_id
+            now = time.time()
+            with self._rtt_lock:
+                sent_time = self.pending_pings.pop(sender_id, None)
+                if sent_time is not None:
+                    rtt = max(0.001, now - sent_time)
+
+                    if sender_id not in self.ema_rtt:
+                        # First measurement — set baseline, assume clear
+                        self.ema_rtt[sender_id] = rtt
+                        self.congestion_scores[sender_id] = 1.0
+                    else:
+                        base_rtt = self.ema_rtt[sender_id]
+
+                        # Congestion score = baseline / current
+                        # clear:  rtt ≈ base → score ≈ 1.0
+                        # congested: rtt >> base → score → 0.0
+                        score = max(0.0, min(1.0, base_rtt / rtt))
+                        self.congestion_scores[sender_id] = score
+
+                        if score < 0.67:  # RTT > 1.5x baseline
+                            logger.warning(
+                                "[HBM] Congestion on %s: score=%.2f (RTT %.3fs vs EMA %.3fs)",
+                                sender_id[:8], score, rtt, base_rtt,
+                            )
+
+                        # Update EMA baseline
+                        self.ema_rtt[sender_id] = self.rtt_alpha * rtt + (1 - self.rtt_alpha) * base_rtt
 
     def on_edge_failure(self, node_id: str) -> None:
         """
