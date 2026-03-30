@@ -54,7 +54,8 @@ def test_ema_success():
     peer = _make_peer(8200)
     node.add_neighbour(peer, edge_prob=0.5)
 
-    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5)
+    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5,
+                     w_rel=1.0, w_cong=0.0)
     em.add_edge(peer.node_id, initial_prob=0.5)
 
     # First success: 0.8 * 0.5 + 0.2 * 1.0 = 0.6
@@ -86,7 +87,8 @@ def test_ema_failure():
     peer = _make_peer(8201)
     node.add_neighbour(peer, edge_prob=1.0)
 
-    em = EdgeManager(node=node, lambda_ema=lam, initial_score=1.0)
+    em = EdgeManager(node=node, lambda_ema=lam, initial_score=1.0,
+                     w_rel=1.0, w_cong=0.0)
     em.add_edge(peer.node_id, initial_prob=1.0)
 
     # First failure: 0.8 * 1.0 + 0.2 * 0.0 = 0.8
@@ -122,6 +124,7 @@ def test_edge_death():
         lambda_ema=lam,
         dead_threshold=dead_thresh,
         initial_score=0.5,
+        w_rel=1.0, w_cong=0.0,
         on_edge_died=lambda nid: died_events.append(nid),
     )
     em.add_edge(peer.node_id, initial_prob=0.5)
@@ -156,6 +159,7 @@ def test_edge_revival():
         dead_threshold=0.1,
         revival_threshold=0.3,
         initial_score=0.5,
+        w_rel=1.0, w_cong=0.0,
         on_edge_died=lambda nid: died.append(nid),
         on_edge_revived=lambda nid: revived.append(nid),
     )
@@ -184,7 +188,8 @@ def test_sync():
     peer = _make_peer(8204)
     node.add_neighbour(peer, edge_prob=0.5)
 
-    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5)
+    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5,
+                     w_rel=1.0, w_cong=0.0)
     em.add_edge(peer.node_id, initial_prob=0.5)
 
     # Mix of successes and failures
@@ -207,7 +212,8 @@ def test_aliases():
     peer = _make_peer(8205)
     node.add_neighbour(peer, edge_prob=0.5)
 
-    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5)
+    em = EdgeManager(node=node, lambda_ema=lam, initial_score=0.5,
+                     w_rel=1.0, w_cong=0.0)
     em.add_edge(peer.node_id, initial_prob=0.5)
 
     em.reinforce(peer.node_id)

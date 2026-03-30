@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gossip Protocol Dashboard</title>
+    <link rel="stylesheet" href="/static/styles/main.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <h1>Gossip Protocol Dashboard</h1>
+            <div class="header-status">
+                <span class="status-dot" :class="connected ? 'online' : 'offline'"></span>
+                <span>{{ connected ? 'Connected' : 'Connecting...' }}</span>
+                <span class="badge">{{ topology.nodes.length }} nodes</span>
+            </div>
+        </header>
+
+        <!-- Tab Navigation -->
+        <nav class="tabs">
+            <button class="tab" :class="{ active: activeTab === 'graph' }"
+                    @click="activeTab = 'graph'">Network Graph</button>
+            <button class="tab" :class="{ active: activeTab === 'channels' }"
+                    @click="activeTab = 'channels'">Channels</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="content">
+            <!-- Network Graph Tab -->
+            <div v-show="activeTab === 'graph'" class="tab-panel">
+                <div class="graph-container">
+                    <network-graph
+                        :topology="topology"
+                        :selected-channel="selectedChannel"
+                        :channel-detail="channelDetail"
+                        @node-click="onNodeClick">
+                    </network-graph>
+
+                    <!-- Node Detail Side Panel -->
+                    <node-detail
+                        v-if="selectedNode"
+                        :node="selectedNode"
+                        :channels="channels"
+                        @close="selectedNode = null"
+                        @show-messages="showNodeMessages">
+                    </node-detail>
+                </div>
+
+                <!-- Legend -->
+                <div class="legend">
+                    <span class="legend-item"><span class="dot seed"></span> Seed</span>
+                    <span class="legend-item"><span class="dot alive"></span> Alive</span>
+                    <span class="legend-item"><span class="dot suspect"></span> Suspect</span>
+                    <span class="legend-item"><span class="dot dead"></span> Dead</span>
+                    <span class="legend-item"><span class="dot core"></span> Core</span>
+                    <span class="legend-item"><span class="dot sequencer"></span> Sequencer</span>
+                    <span class="legend-item"><span class="line good"></span> High Prob</span>
+                    <span class="legend-item"><span class="line bad"></span> Low Prob</span>
+                </div>
+
+                <!-- Channel overlay selector -->
+                <div class="channel-overlay-selector">
+                    <label>Channel overlay:</label>
+                    <select v-model="selectedChannel" @change="onChannelOverlayChange">
+                        <option value="">None</option>
+                        <option v-for="ch in channels" :key="ch.name" :value="ch.name">
+                            {{ ch.name }} ({{ ch.total_subscribers }} subs)
+                        </option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Channels Tab -->
+            <div v-show="activeTab === 'channels'" class="tab-panel">
+                <channel-list
+                    :channels="channels"
+                    @select="onChannelSelect">
+                </channel-list>
+
+                <channel-view
+                    v-if="selectedChannelForView"
+                    :channel="selectedChannelForView"
+                    :detail="channelDetail"
+                    @close="selectedChannelForView = null">
+                </channel-view>
+            </div>
+        </main>
+
+        <!-- Message History Modal -->
+        <div v-if="messageModal.visible" class="modal-overlay" @click.self="messageModal.visible = false">
+            <div class="modal">
+                <div class="modal-header">
+                    <h3>Messages: {{ messageModal.channel }} @ {{ messageModal.nodeId.substring(0, 8) }}</h3>
+                    <button class="close-btn" @click="messageModal.visible = false">&times;</button>
+                </div>
+                <message-history
+                    :messages="messageModal.messages"
+                    :last-delivered-seq="messageModal.lastDeliveredSeq">
+                </message-history>
+            </div>
+        </div>
+    </div>
+
+    <!-- Vue Components -->
+    <script src="/static/components/NetworkGraph.js"></script>
+    <script src="/static/components/ChannelList.js"></script>
+    <script src="/static/components/ChannelView.js"></script>
+    <script src="/static/components/NodeDetail.js"></script>
+    <script src="/static/components/MessageHistory.js"></script>
+    <script src="/static/vue-app.js"></script>
+</body>
+</html>

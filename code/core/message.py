@@ -97,6 +97,32 @@ class MessageType(Enum):
     JOIN          = auto()
     LEAVE         = auto()
 
+    # Total order — sequencing
+    SEQUENCE_ASSIGN     = auto()  # Sequencer → network: assigns seq_num to a message
+    SEQUENCER_ANNOUNCE  = auto()  # Sequencer announces itself for a channel
+
+    # History recovery
+    HISTORY_REQUEST     = auto()  # Node → core: request messages [from_seq..to_seq]
+    HISTORY_RESPONSE    = auto()  # Core → node: batch of sequenced messages
+
+    # Monitoring
+    STATUS_REPORT       = auto()  # Node → monitor: periodic status payload
+    STATUS_REQUEST      = auto()  # Monitor → node: request immediate status
+
+    # Dynamic core nodes
+    CORE_JOIN_REQUEST   = auto()  # Node → Sequencer: request to join core group
+    CORE_JOIN_APPROVED  = auto()  # Sequencer → all: new core node announcement
+    CORE_LEAVE          = auto()  # Core node → all: leaving core group (gap detected)
+
+    # Dynamic sequencer election
+    ELECTION_REQUEST    = auto()  # Core node → core nodes: sequencer suspected dead
+    NEW_SEQUENCER       = auto()  # Core nodes → all: new sequencer elected
+    SEQUENCER_HEARTBEAT = auto()  # Sequencer → core nodes: fast heartbeat with last_seq
+
+    # Sequencer discovery (bootstrap)
+    FIND_SEQUENCER_REQUEST  = auto()  # Node → broadcast: who is the sequencer?
+    FIND_SEQUENCER_RESPONSE = auto()  # Any node → requester: sequencer info
+
 
 # ---------------------------------------------------------------------------
 # Node status (used in heartbeat neighbour table)
@@ -403,4 +429,122 @@ class MessageFactory:
         return self.create(
             MessageType.PEER_LIST_RESPONSE,
             content=peers,
+        )
+
+    def sequence_assign(
+        self, channel: str, original_msg: Dict[str, Any], seq_num: int
+    ) -> Message:
+        """Sequencer wraps a GOSSIP message with a global sequence number."""
+        return self.create(
+            MessageType.SEQUENCE_ASSIGN,
+            channel=channel,
+            content=original_msg,
+            metadata={"seq_num": seq_num},
+        )
+
+    def sequencer_announce(self, channel: str) -> Message:
+        """Announce this node as the sequencer for a channel."""
+        return self.create(
+            MessageType.SEQUENCER_ANNOUNCE,
+            channel=channel,
+        )
+
+    def history_request(
+        self, channel: str, from_seq: int, to_seq: int = -1
+    ) -> Message:
+        """Request sequenced messages in range [from_seq, to_seq] from a core node."""
+        return self.create(
+            MessageType.HISTORY_REQUEST,
+            channel=channel,
+            metadata={"from_seq": from_seq, "to_seq": to_seq},
+        )
+
+    def history_response(self, channel: str, messages: List[Dict[str, Any]]) -> Message:
+        """Respond with a batch of sequenced messages."""
+        return self.create(
+            MessageType.HISTORY_RESPONSE,
+            channel=channel,
+            content=messages,
+        )
+
+    def status_report(self, status_data: Dict[str, Any]) -> Message:
+        """Periodic status report sent to the monitoring server."""
+        return self.create(MessageType.STATUS_REPORT, content=status_data)
+
+    # --- Dynamic core nodes ---
+
+    def core_join_request(self, channel: str) -> Message:
+        """Request to join the core group for a channel."""
+        return self.create(MessageType.CORE_JOIN_REQUEST, channel=channel)
+
+    def core_join_approved(
+        self, channel: str, new_core_address: str, core_list: List[str]
+    ) -> Message:
+        """Announce a new core node to the entire network."""
+        return self.create(
+            MessageType.CORE_JOIN_APPROVED,
+            channel=channel,
+            content={"new_core_address": new_core_address, "core_list": core_list},
+        )
+
+    def core_leave(
+        self, channel: str, leaving_address: str, core_list: List[str]
+    ) -> Message:
+        """Announce departure from the core group."""
+        return self.create(
+            MessageType.CORE_LEAVE,
+            channel=channel,
+            content={"leaving_address": leaving_address, "core_list": core_list},
+        )
+
+    # --- Dynamic sequencer election ---
+
+    def election_request(self, channel: str, last_known_seq: int) -> Message:
+        """Request an election because the sequencer is suspected dead."""
+        return self.create(
+            MessageType.ELECTION_REQUEST,
+            channel=channel,
+            metadata={"last_known_seq": last_known_seq},
+        )
+
+    def new_sequencer(
+        self,
+        channel: str,
+        sequencer_address: str,
+        next_seq_num: int,
+        core_list: List[str],
+    ) -> Message:
+        """Announce the newly elected sequencer."""
+        return self.create(
+            MessageType.NEW_SEQUENCER,
+            channel=channel,
+            content={
+                "sequencer_address": sequencer_address,
+                "next_seq_num": next_seq_num,
+                "core_list": core_list,
+            },
+        )
+
+    def sequencer_heartbeat(self, channel: str, last_seq: int) -> Message:
+        """Fast heartbeat from sequencer to core nodes, includes last assigned seq."""
+        return self.create(
+            MessageType.SEQUENCER_HEARTBEAT,
+            channel=channel,
+            metadata={"last_seq": last_seq},
+        )
+
+    # --- Sequencer discovery ---
+
+    def find_sequencer_request(self, channel: str) -> Message:
+        """Broadcast: who is the sequencer for this channel?"""
+        return self.create(MessageType.FIND_SEQUENCER_REQUEST, channel=channel)
+
+    def find_sequencer_response(
+        self, channel: str, sequencer_address: str, core_list: List[str]
+    ) -> Message:
+        """Response with current sequencer info."""
+        return self.create(
+            MessageType.FIND_SEQUENCER_RESPONSE,
+            channel=channel,
+            content={"sequencer_address": sequencer_address, "core_list": core_list},
         )
