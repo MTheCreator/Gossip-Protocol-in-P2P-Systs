@@ -1,21 +1,23 @@
 /**
- * vue-app.js — Main Vue 3 application for Gossip Protocol Dashboard
+ * vue-app.js — Main Vue 3 application
  *
- * Polls the REST API every 2 seconds and feeds data into components.
+ * Features: overview tab with KPIs, topology graph with overlays,
+ * channel detail, node detail, message modal. Polls API every 2s.
  */
 const { createApp } = Vue;
 
 const app = createApp({
     data() {
         return {
-            activeTab: 'graph',
+            appReady: false,
+            activeTab: 'overview',
             connected: false,
             topology: { nodes: [], edges: [] },
             channels: [],
-            selectedChannel: '',        // for graph overlay
+            selectedChannel: '',
             channelDetail: null,
-            selectedNode: null,          // for side panel
-            selectedChannelForView: null, // for channel detail view
+            selectedNode: null,
+            selectedChannelForView: null,
             messageModal: {
                 visible: false,
                 nodeId: '',
@@ -27,9 +29,59 @@ const app = createApp({
         };
     },
 
+    computed: {
+        kpis() {
+            const nodes = this.topology.nodes;
+            const alive = nodes.filter(n => n.status === 'alive').length;
+            const totalDelivered = nodes.reduce((sum, n) => sum + ((n.stats || {}).delivered || 0), 0);
+
+            // Count sequencers and core nodes across all channels
+            let seqCount = 0;
+            let coreCount = 0;
+            nodes.forEach(n => {
+                const ss = n.sequencer_status || {};
+                const cs = n.core_status || {};
+                for (const ch in ss) { if (ss[ch].is_sequencer) seqCount++; }
+                for (const ch in cs) { if (cs[ch].is_core) coreCount++; }
+            });
+
+            return [
+                {
+                    label: 'Active Nodes',
+                    value: alive,
+                    bg: 'var(--green-bg)',
+                    icon: '<svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="8" stroke="#10b981" stroke-width="2"/><path d="M7.5 11l2.5 2.5 4.5-5" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+                },
+                {
+                    label: 'Channels',
+                    value: this.channels.length,
+                    bg: 'var(--primary-bg)',
+                    icon: '<svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 7h14M4 11h14M4 15h10" stroke="#6366f1" stroke-width="2" stroke-linecap="round"/></svg>',
+                },
+                {
+                    label: 'Core Nodes',
+                    value: coreCount,
+                    bg: 'var(--amber-bg)',
+                    icon: '<svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3l7 4v8l-7 4-7-4V7l7-4z" stroke="#f59e0b" stroke-width="2" stroke-linejoin="round"/></svg>',
+                },
+                {
+                    label: 'Msgs Delivered',
+                    value: totalDelivered,
+                    bg: 'var(--blue-bg)',
+                    icon: '<svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 16V6l7 5 7-5v10" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+                },
+            ];
+        },
+    },
+
     mounted() {
+        document.body.classList.add('dashboard-ready');
+        const appRoot = document.getElementById('app');
+        if (appRoot) appRoot.classList.add('loaded');
         this.poll();
         this._pollTimer = setInterval(() => this.poll(), 2000);
+        // Trigger entrance animation
+        requestAnimationFrame(() => { this.appReady = true; });
     },
 
     beforeUnmount() {
@@ -51,7 +103,6 @@ const app = createApp({
                     this.channels = await chRes.json();
                 }
 
-                // Refresh channel detail if one is selected
                 if (this.selectedChannel) {
                     this.fetchChannelDetail(this.selectedChannel);
                 }
@@ -84,6 +135,9 @@ const app = createApp({
 
         onNodeClick(node) {
             this.selectedNode = node;
+            if (this.activeTab === 'overview') {
+                this.activeTab = 'graph';
+            }
         },
 
         onChannelSelect(name) {

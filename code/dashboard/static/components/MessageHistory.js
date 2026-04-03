@@ -1,9 +1,5 @@
 /**
- * MessageHistory.js — Scrollable message history with gap visualization
- *
- * Props:
- *   messages         — array of { seq_num, content, sender_id, timestamp, ... }
- *   lastDeliveredSeq — highest delivered seq (to render gaps up to)
+ * MessageHistory.js — Animated message feed with gap visualization
  */
 const MessageHistory = {
     name: 'MessageHistory',
@@ -12,23 +8,28 @@ const MessageHistory = {
         lastDeliveredSeq: { type: Number, default: 0 },
     },
     template: `
-        <div class="message-history">
-            <div v-if="entries.length === 0" class="meta" style="padding:12px">
-                No messages yet.
+        <div class="message-feed" ref="feed">
+            <div v-if="entries.length === 0" class="empty-state" style="padding:24px">
+                No messages yet
             </div>
-            <div v-for="entry in entries" :key="entry.seq"
-                 class="msg-card" :class="entry.type">
-                <template v-if="entry.type === 'delivered'">
-                    <span class="msg-seq">[{{ entry.seq }}]</span>
-                    <span class="msg-content">{{ formatContent(entry.content) }}</span>
-                    <div class="msg-meta">
-                        from {{ (entry.original_sender || entry.sender_id || '').substring(0, 8) }}
-                        &middot; {{ formatTime(entry.timestamp) }}
+            <div v-for="(entry, i) in entries" :key="entry.seq"
+                 class="msg-item" :class="entry.type"
+                 :style="{ animationDelay: Math.min(i * 25, 500) + 'ms' }">
+
+                <div class="msg-seq-badge">{{ entry.seq }}</div>
+
+                <div class="msg-body" v-if="entry.type === 'delivered'">
+                    <div class="msg-content-text">{{ formatContent(entry.content) }}</div>
+                    <div class="msg-meta-line">
+                        {{ shortId(entry.original_sender || entry.sender_id) }}
+                        &middot;
+                        {{ formatTime(entry.timestamp) }}
                     </div>
-                </template>
-                <template v-else>
-                    Missing message (seq={{ entry.seq }})
-                </template>
+                </div>
+
+                <div class="msg-body" v-else>
+                    <div class="msg-gap-label">Missing message</div>
+                </div>
             </div>
         </div>
     `,
@@ -36,7 +37,6 @@ const MessageHistory = {
     computed: {
         entries() {
             if (!this.lastDeliveredSeq || this.lastDeliveredSeq <= 0) {
-                // Just show delivered messages in order
                 return this.messages.map(m => ({
                     seq: m.seq_num,
                     type: 'delivered',
@@ -47,15 +47,11 @@ const MessageHistory = {
                 }));
             }
 
-            // Build a lookup of delivered seq_nums
             const delivered = {};
-            this.messages.forEach(m => {
-                delivered[m.seq_num] = m;
-            });
+            this.messages.forEach(m => { delivered[m.seq_num] = m; });
 
-            // Iterate 1..lastDeliveredSeq, mark gaps
             const result = [];
-            const start = Math.max(1, this.lastDeliveredSeq - 99); // show last 100
+            const start = Math.max(1, this.lastDeliveredSeq - 99);
             for (let seq = start; seq <= this.lastDeliveredSeq; seq++) {
                 const m = delivered[seq];
                 if (m) {
@@ -75,6 +71,15 @@ const MessageHistory = {
         },
     },
 
+    watch: {
+        entries() {
+            this.$nextTick(() => {
+                const feed = this.$refs.feed;
+                if (feed) feed.scrollTop = feed.scrollHeight;
+            });
+        },
+    },
+
     methods: {
         formatContent(content) {
             if (content === null || content === undefined) return '';
@@ -84,11 +89,14 @@ const MessageHistory = {
         formatTime(ts) {
             if (!ts) return '';
             try {
-                const d = new Date(ts * 1000);
-                return d.toLocaleTimeString();
+                return new Date(ts * 1000).toLocaleTimeString();
             } catch {
                 return String(ts);
             }
+        },
+        shortId(id) {
+            if (!id) return '??';
+            return id.substring(0, 8);
         },
     },
 };
