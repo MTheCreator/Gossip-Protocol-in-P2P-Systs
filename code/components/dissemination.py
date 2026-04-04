@@ -313,6 +313,12 @@ class DisseminationEngine:
         if msg.msg_type != MessageType.GOSSIP:
             return
 
+        # Duplicate suppression: once a message is seen locally, do not
+        # re-process or re-forward it. This prevents forwarding loops from
+        # starving heartbeat handling in dense topologies.
+        if self.node.is_seen(msg.msg_id):
+            return
+
         # --- Standard GOSSIP handling ---
 
         # 1. Already processed beyond threshold?
@@ -362,6 +368,11 @@ class DisseminationEngine:
         2. Feed into the channel's OrderedDeliveryBuffer
         3. Forward to neighbours (standard gossip)
         """
+        # Duplicate suppression first: SEQUENCE_ASSIGN already fan-outs from
+        # the sequencer, so re-gossiping duplicates causes avoidable storms.
+        if self.node.is_seen(msg.msg_id):
+            return
+
         if not self.node.should_forward(msg.msg_id):
             return
 

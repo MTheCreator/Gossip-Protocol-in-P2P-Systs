@@ -182,10 +182,16 @@ class LocalNode:
                 self._neighbours[peer.node_id].edge_prob = edge_prob
                 return True
 
-            if len(self._neighbours) >= self.config.gossip.fmax:
+            # Seed nodes are allowed to accept more neighbours.
+            limit = (
+                self.config.discovery.seed_fmax_override
+                if self.is_seed_node
+                else self.config.gossip.fmax
+            )
+            if len(self._neighbours) >= limit:
                 logger.debug(
-                    "fmax=%d reached, rejecting neighbour %s",
-                    self.config.gossip.fmax, peer
+                    "limit=%d reached, rejecting neighbour %s",
+                    limit, peer
                 )
                 return False
 

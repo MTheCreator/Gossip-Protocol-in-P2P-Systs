@@ -90,7 +90,12 @@ def main():
 
     # Clean leftover files from previous runs
     for port in [7001, 7002, 7003]:
-        for f in [f"demo_peers_{port}.json", f"demo_store_{port}.db"]:
+        for f in [
+            f"demo_peers_{port}.json",
+            f"demo_store_{port}.db",
+            f"demo_store_{port}.db-wal",
+            f"demo_store_{port}.db-shm",
+        ]:
             try:
                 os.remove(f)
             except OSError:
@@ -222,7 +227,12 @@ def main():
     monitor.stop()
 
     for port in [7001, 7002, 7003]:
-        for f in [f"demo_peers_{port}.json", f"demo_store_{port}.db"]:
+        for f in [
+            f"demo_peers_{port}.json",
+            f"demo_store_{port}.db",
+            f"demo_store_{port}.db-wal",
+            f"demo_store_{port}.db-shm",
+        ]:
             try:
                 os.remove(f)
             except OSError:

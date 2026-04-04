@@ -110,7 +110,7 @@ class MonitorServer:
     def get_topology(self) -> Dict[str, Any]:
         """Return current network topology as JSON-serializable dict."""
         now = time.time()
-        stale_threshold = 10.0  # seconds without a report → mark dead
+        stale_threshold = 2.0  # seconds without a report → mark dead
 
         with self._lock:
             nodes = []

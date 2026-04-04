@@ -117,7 +117,6 @@ class StatusReporter(threading.Thread):
     def _report(self) -> None:
         """Build and send a status report to the monitor over TCP."""
         if self._monitor_tcp_host is None:
-            print("something wrong here")
             return
 
         status_data = {
@@ -184,7 +183,6 @@ class StatusReporter(threading.Thread):
                 status_data["delivered_messages"] = delivered_msgs
 
         # Send over TCP (length-prefixed JSON)
-        print(status_data["node_id"])
         self._send_tcp(status_data)
 
     def stop(self) -> None:

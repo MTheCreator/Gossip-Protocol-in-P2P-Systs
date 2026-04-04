@@ -128,9 +128,12 @@ class UDPTransport(TransportBase):
                 )
                 continue
 
-            # Resolve sender info from the datagram source address
+            # Resolve sender info from the datagram source address.
+            # Use msg.sender_id as the identity key so ID bookkeeping stays
+            # consistent even when bind address differs (e.g., 0.0.0.0 vs 127.0.0.1).
             sender_host, sender_port = addr
-            sender_info = NodeInfo.from_address(sender_host, sender_port)
+            sender_id = msg.sender_id or NodeInfo.from_address(sender_host, sender_port).node_id
+            sender_info = NodeInfo(node_id=sender_id, host=sender_host, port=sender_port)
 
             # Dispatch
             if self._on_message:

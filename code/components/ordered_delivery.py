@@ -69,7 +69,10 @@ class OrderedDeliveryBuffer:
 
         self._next_expected: int = initial_seq + 1
         self._buffer: Dict[int, Message] = {}
-        self._lock = threading.Lock()
+        # Re-entrant lock: deliver callback can query buffer state
+        # (e.g., pending_count/last_delivered_seq for core-join checks)
+        # while receive() is still in progress.
+        self._lock = threading.RLock()
         self._gap_detected_at: Optional[float] = None
 
     # ------------------------------------------------------------------

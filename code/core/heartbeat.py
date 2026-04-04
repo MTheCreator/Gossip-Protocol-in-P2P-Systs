@@ -113,7 +113,7 @@ class HeartbeatReceiver:
         if msg.msg_type == MessageType.HEARTBEAT:
             self._handle_heartbeat(msg, sender_info)
         elif msg.msg_type == MessageType.HEARTBEAT_ACK:
-            self._handle_ack(msg)
+            self._handle_ack(msg, sender_info)
         else:
             logger.warning("[HB-Receiver] unexpected message type: %s", msg.msg_type)
 
@@ -143,8 +143,20 @@ class HeartbeatReceiver:
             except Exception as exc:
                 logger.warning("[HB-Receiver] ACK send failed: %s", exc)
 
-    def _handle_ack(self, msg: Message) -> None:
+    def _handle_ack(self, msg: Message, sender_info: Optional[NodeInfo]) -> None:
         sender_id = msg.sender_id
+
+        # ACK from an unknown sender can be used as a valid liveness handshake.
+        if sender_info and not self.node.get_neighbour(sender_id):
+            if self.node.is_seed_node:
+                max_neighbours = self.node.config.discovery.seed_fmax_override
+            else:
+                max_neighbours = self.node.config.gossip.fmax
+
+            if self.node.neighbour_count < max_neighbours:
+                self.node.add_neighbour(sender_info)
+                logger.info("[HB-Receiver] auto-added ACK sender %s", sender_id[:8])
+
         self.node.record_heartbeat(sender_id)
         logger.debug("[HB-Receiver] ACK from %s", sender_id[:8])
 

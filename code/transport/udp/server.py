@@ -506,7 +506,8 @@ class UDPServer:
         """Start all components and join the network."""
         logger.info("[UDPServer] Starting node %s", self.node.info)
 
-        # Load persisted neighbours
+        # Load persisted neighbours (to be revalidated after transport starts).
+        persisted_peers: list[NodeInfo] = []
         if self.store:
             saved_peers = self.store.load_neighbours()
             for p in saved_peers:
@@ -514,12 +515,21 @@ class UDPServer:
                     peer = NodeInfo(
                         node_id=p["node_id"], host=p["host"], port=int(p["port"])
                     )
-                    self.node.add_neighbour(peer)
+                    if peer.node_id != self.node.node_id:
+                        persisted_peers.append(peer)
                 except (KeyError, ValueError):
                     pass
 
         # Start transport listener
         self.transport.start(on_message=self._on_message)
+
+        # Re-validate persisted peers instead of trusting stale entries.
+        if persisted_peers:
+            logger.info(
+                "[UDPServer] Re-validating %d persisted peers",
+                len(persisted_peers),
+            )
+            self.discovery._try_connect_all(persisted_peers)
 
         # Join the network
         self.discovery.join_network()

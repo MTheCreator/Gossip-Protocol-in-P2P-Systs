@@ -342,6 +342,7 @@ class GRPCServer:
     def start(self) -> None:
         logger.info("[GRPCServer] Starting node %s", self.node.info)
 
+        persisted_peers: list[NodeInfo] = []
         if self.store:
             saved_peers = self.store.load_neighbours()
             for p in saved_peers:
@@ -349,11 +350,18 @@ class GRPCServer:
                     peer = NodeInfo(
                         node_id=p["node_id"], host=p["host"], port=int(p["port"])
                     )
-                    self.node.add_neighbour(peer)
+                    if peer.node_id != self.node.node_id:
+                        persisted_peers.append(peer)
                 except (KeyError, ValueError):
                     pass
 
         self.transport.start(on_message=self._on_message)
+        if persisted_peers:
+            logger.info(
+                "[GRPCServer] Re-validating %d persisted peers",
+                len(persisted_peers),
+            )
+            self.discovery._try_connect_all(persisted_peers)
         self.discovery.join_network()
         self.heartbeat.start()
         self.edge_manager.start()

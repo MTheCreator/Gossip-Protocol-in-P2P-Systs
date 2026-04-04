@@ -206,6 +206,7 @@ class PeerDiscovery:
         neighbour (up to fmax).  Returns the number of newly added peers.
         """
         added = 0
+        is_udp = self.node.config.transport == "udp"
         for peer in candidates:
             if peer.node_id == self.node.node_id:
                 continue  # don't connect to ourselves
@@ -214,12 +215,13 @@ class PeerDiscovery:
                 logger.debug("[Discovery] fmax reached, stopping connection attempts")
                 break
 
-            if self.node.get_neighbour(peer.node_id) is not None:
+            if self._has_neighbour(peer):
                 continue  # already a neighbour
 
             logger.debug("[Discovery] Trying peer %s (%s)", peer.node_id[:8], peer.address)
 
-            # Send a PING to check liveness
+            # Send a PING to check liveness. For UDP, send success alone does
+            # not prove the peer exists; require a heartbeat/ACK handshake.
             ping = self.node.factory.create(MessageType.HEARTBEAT)
             try:
                 alive = self.send_fn(peer, ping)
@@ -231,14 +233,28 @@ class PeerDiscovery:
                 logger.debug("[Discovery] Peer %s did not respond", peer.address)
                 continue
 
-            # Success — add as neighbour
-            if self.node.add_neighbour(peer):
-                added += 1
-                logger.info(
-                    "[Discovery] Connected to %s (%s) [%d/%d]",
-                    peer.node_id[:8], peer.address,
-                    self.node.neighbour_count, self.node.config.gossip.fmax,
-                )
+            if is_udp:
+                if self._await_handshake(peer):
+                    added += 1
+                    logger.info(
+                        "[Discovery] Connected to %s (%s) [%d/%d]",
+                        peer.node_id[:8], peer.address,
+                        self.node.neighbour_count, self.node.config.gossip.fmax,
+                    )
+                else:
+                    logger.debug(
+                        "[Discovery] Handshake timeout for %s (%s)",
+                        peer.node_id[:8], peer.address,
+                    )
+            else:
+                # gRPC send failures are explicit, so optimistic add is safe.
+                if self.node.add_neighbour(peer):
+                    added += 1
+                    logger.info(
+                        "[Discovery] Connected to %s (%s) [%d/%d]",
+                        peer.node_id[:8], peer.address,
+                        self.node.neighbour_count, self.node.config.gossip.fmax,
+                    )
 
         # Request peer exchange from all newly connected peers
         if added > 0:
@@ -267,6 +283,42 @@ class PeerDiscovery:
             except (ValueError, AttributeError) as exc:
                 logger.warning("[Discovery] Invalid seed address '%s': %s", addr, exc)
         return results
+
+    def _has_neighbour(self, peer: NodeInfo) -> bool:
+        if self.node.get_neighbour(peer.node_id) is not None:
+            return True
+        for entry in self.node.all_neighbours():
+            if entry.info.host == peer.host and entry.info.port == peer.port:
+                return True
+        return False
+
+    def _await_handshake(self, peer: NodeInfo) -> bool:
+        timeout = max(0.3, min(self.timeout, 3.0))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._has_neighbour(peer):
+                return True
+            time.sleep(0.02)
+        return self._has_neighbour(peer)
+
+    def _connect_candidates_async(self, candidates: List[NodeInfo]) -> None:
+        """Connect to peers in a background thread to avoid blocking recv loop."""
+        if not candidates:
+            return
+
+        def _worker() -> None:
+            try:
+                added = self._try_connect_all(candidates)
+                if added > 0:
+                    self.on_peers_updated()
+            except Exception as exc:
+                logger.warning("[Discovery] Async connect failed: %s", exc)
+
+        threading.Thread(
+            target=_worker,
+            name=f"PeerConnect-{self.node.node_id[:8]}",
+            daemon=True,
+        ).start()
 
     # ------------------------------------------------------------------
     # Peer Exchange
@@ -323,7 +375,10 @@ class PeerDiscovery:
             return
 
         new_count = 0
+        queued_count = 0
         all_peers: List[NodeInfo] = []
+        udp_candidates: List[NodeInfo] = []
+        is_udp = self.node.config.transport == "udp"
 
         for p in msg.content:
             try:
@@ -338,20 +393,27 @@ class PeerDiscovery:
             if peer.node_id == self.node.node_id:
                 continue  # skip self
 
-            if self.node.get_neighbour(peer.node_id) is not None:
+            if self._has_neighbour(peer):
                 continue  # already known
 
-            if self.node.add_neighbour(peer):
+            if is_udp:
+                udp_candidates.append(peer)
+                queued_count += 1
+            elif self.node.add_neighbour(peer):
                 new_count += 1
                 logger.info("[Discovery] Added new peer %s via exchange", peer.node_id[:8])
 
         # Refresh the local cache with fresh data
         self.cache.save(all_peers)
 
+        if is_udp and udp_candidates:
+            # In UDP, validate via heartbeat handshake before adding.
+            self._connect_candidates_async(udp_candidates)
+
         logger.info(
-            "[Discovery] Peer exchange complete: %d new peers added, "
+            "[Discovery] Peer exchange complete: %d new peers added, %d queued for validation, "
             "cache updated with %d entries",
-            new_count, len(all_peers),
+            new_count, queued_count, len(all_peers),
         )
         self.on_peers_updated()
 
@@ -442,4 +504,3 @@ class PeerDiscovery:
             logger.info("[Discovery] Saved %d peers to cache on shutdown", len(current_peers))
 
         logger.info("[Discovery] Shut down")
-
