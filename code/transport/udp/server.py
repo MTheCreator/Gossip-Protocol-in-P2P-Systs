@@ -209,14 +209,38 @@ class UDPServer:
         self._find_seq_responses[channel] = []
         self._find_seq_events[channel] = threading.Event()
 
+        # Build target list: alive neighbours + seed nodes (for redundancy)
+        seed_infos = []
+        for seed_addr in self.config.discovery.seed_nodes:
+            try:
+                h, p = seed_addr.rsplit(":", 1)
+                si = NodeInfo.from_address(h, int(p))
+                if si.node_id != self.node.node_id:
+                    seed_infos.append(si)
+            except (ValueError, AttributeError):
+                pass
+
         bootstrap_cfg = self.config.bootstrap
         for attempt in range(bootstrap_cfg.broadcast_attempts):
             req = self.node.factory.find_sequencer_request(channel)
+
+            # Send to all alive neighbours
+            targets_sent = set()
             for entry in self.node.alive_neighbours():
                 try:
                     self._send_fn(entry.info, req)
+                    targets_sent.add(entry.info.node_id)
                 except Exception:
                     pass
+
+            # Also send directly to seed nodes (they may know the sequencer
+            # even if they aren't in our neighbour table yet)
+            for si in seed_infos:
+                if si.node_id not in targets_sent:
+                    try:
+                        self._send_fn(si, req)
+                    except Exception:
+                        pass
 
             # Wait for a response
             if self._find_seq_events[channel].wait(bootstrap_cfg.broadcast_interval):
@@ -506,6 +530,13 @@ class UDPServer:
         self.discovery.start()
         self.engine.start_gap_checker()
 
+        # Wait for at least one neighbour before bootstrap
+        # (discovery.join_network() contacts seeds but responses are async)
+        bootstrap_cfg = self.config.bootstrap
+        deadline = time.time() + bootstrap_cfg.bootstrap_wait
+        while self.node.neighbour_count == 0 and time.time() < deadline:
+            time.sleep(0.3)
+
         # Bootstrap channels (discover/elect sequencers)
         self._bootstrap_channels()
 
@@ -529,7 +560,10 @@ class UDPServer:
         logger.info("[UDPServer] Node %s is running", self.node.address)
 
     def stop(self) -> None:
-        """Gracefully shut down all components."""
+        """Gracefully shut down all components. Safe to call multiple times."""
+        if getattr(self, '_stopped', False):
+            return
+        self._stopped = True
         logger.info("[UDPServer] Stopping node %s", self.node.address)
 
         if self.status_reporter:

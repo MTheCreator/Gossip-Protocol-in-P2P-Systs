@@ -524,6 +524,17 @@ body.dashboard-ready .dashboard-fallback {
     100% { opacity: 0.92; }
 }
 
+.seq-pulse-ring {
+    animation: seqPulse 1.8s ease-in-out infinite;
+    transform-origin: center;
+}
+
+@keyframes seqPulse {
+    0%   { r: attr(r); opacity: 0.4; }
+    50%  { opacity: 0.15; }
+    100% { opacity: 0.4; }
+}
+
 @keyframes graphEdgeGlow {
     0% { stroke-opacity: 0.45; }
     50% { stroke-opacity: 0.9; }

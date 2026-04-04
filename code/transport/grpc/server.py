@@ -147,14 +147,33 @@ class GRPCServer:
         self._find_seq_responses[channel] = []
         self._find_seq_events[channel] = threading.Event()
 
+        # Build seed node targets for fallback
+        seed_infos = []
+        for seed_addr in self.config.discovery.seed_nodes:
+            try:
+                h, p = seed_addr.rsplit(":", 1)
+                si = NodeInfo.from_address(h, int(p))
+                if si.node_id != self.node.node_id:
+                    seed_infos.append(si)
+            except (ValueError, AttributeError):
+                pass
+
         bootstrap_cfg = self.config.bootstrap
         for _ in range(bootstrap_cfg.broadcast_attempts):
             req = self.node.factory.find_sequencer_request(channel)
+            targets_sent = set()
             for entry in self.node.alive_neighbours():
                 try:
                     self._send_fn(entry.info, req)
+                    targets_sent.add(entry.info.node_id)
                 except Exception:
                     pass
+            for si in seed_infos:
+                if si.node_id not in targets_sent:
+                    try:
+                        self._send_fn(si, req)
+                    except Exception:
+                        pass
             if self._find_seq_events[channel].wait(bootstrap_cfg.broadcast_interval):
                 break
 
@@ -340,6 +359,12 @@ class GRPCServer:
         self.edge_manager.start()
         self.discovery.start()
         self.engine.start_gap_checker()
+
+        # Wait for at least one neighbour before bootstrap
+        bootstrap_cfg = self.config.bootstrap
+        deadline = time.time() + bootstrap_cfg.bootstrap_wait
+        while self.node.neighbour_count == 0 and time.time() < deadline:
+            time.sleep(0.3)
 
         self._bootstrap_channels()
 

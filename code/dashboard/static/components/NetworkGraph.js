@@ -73,13 +73,25 @@ const NetworkGraph = {
                             :style="{ animationDelay: node.animDelay }"
                             @click="$emit('node-click', node.raw)"
                         >
+                            <!-- Sequencer pulsing ring -->
                             <circle
-                                v-if="node.isSeed"
+                                v-if="node.isSequencer"
+                                :r="node.radius + 12"
+                                fill="none"
+                                stroke="#ef4444"
+                                stroke-width="2"
+                                opacity="0.4"
+                                class="seq-pulse-ring"
+                            />
+                            <!-- Seed outer ring -->
+                            <circle
+                                v-if="node.isSeed && !node.isSequencer"
                                 :r="node.radius + 10"
                                 fill="none"
                                 stroke="rgba(99, 102, 241, 0.2)"
                                 stroke-width="4"
                             />
+                            <!-- Main circle -->
                             <circle
                                 :r="node.radius"
                                 :fill="node.fill"
@@ -87,8 +99,8 @@ const NetworkGraph = {
                                 stroke-width="3"
                                 :opacity="node.opacity"
                             />
-                            <text y="-18" text-anchor="middle" fill="#334155" font-size="12" font-family="Inter, system-ui, sans-serif">{{ node.label }}</text>
-                            <text y="30" text-anchor="middle" fill="#64748b" font-size="10" font-family="Inter, system-ui, sans-serif">{{ node.status }}</text>
+                            <text y="-22" text-anchor="middle" fill="#334155" font-size="12" font-weight="500" font-family="Inter, system-ui, sans-serif">{{ node.label }}</text>
+                            <text y="32" text-anchor="middle" :fill="node.isSequencer ? '#ef4444' : node.status === 'core' ? '#d97706' : '#64748b'" font-size="10" font-weight="600" font-family="Inter, system-ui, sans-serif">{{ node.status }}</text>
                         </g>
                     </g>
                 </svg>
@@ -147,14 +159,21 @@ const NetworkGraph = {
                 const y = baseY + motion.dy;
                 const inChannel = this.channelNodeSet.size === 0 || this.channelNodeSet.has(node.id);
 
+                // Build a role label
+                let roleLabel = node.status || 'unknown';
+                if (this.isSequencer(node)) roleLabel = 'sequencer';
+                else if (this.isCore(node)) roleLabel = 'core';
+                else if (node.is_seed) roleLabel = 'seed';
+
                 return {
                     id: node.id,
                     raw: node,
                     x,
                     y,
-                    label: node.label || node.id.substring(0, 8),
-                    status: node.status || 'unknown',
+                    label: node.address ? (':' + node.address.split(':').pop()) : (node.label || node.id.substring(0, 8)),
+                    status: roleLabel,
                     isSeed: !!node.is_seed,
+                    isSequencer: this.isSequencer(node),
                     radius: this.getRadius(node, inChannel),
                     fill: this.getFill(node, inChannel),
                     stroke: this.getStroke(node, inChannel),
@@ -195,8 +214,22 @@ const NetworkGraph = {
     },
 
     methods: {
+        isSequencer(node) {
+            const ss = node.sequencer_status || {};
+            for (const ch in ss) { if (ss[ch].is_sequencer) return true; }
+            return false;
+        },
+
+        isCore(node) {
+            const cs = node.core_status || {};
+            for (const ch in cs) { if (cs[ch].is_core) return true; }
+            return false;
+        },
+
         getRadius(node, inChannel) {
             if (!inChannel) return this.mini ? 8 : 10;
+            if (this.isSequencer(node)) return this.mini ? 18 : 24;
+            if (this.isCore(node)) return this.mini ? 14 : 18;
             if (node.is_seed) return this.mini ? 16 : 20;
             if (node.status === 'suspect') return this.mini ? 13 : 16;
             if (node.status === 'dead') return this.mini ? 9 : 11;
@@ -205,16 +238,20 @@ const NetworkGraph = {
 
         getFill(node, inChannel) {
             if (!inChannel) return '#cbd5e1';
-            if (node.is_seed) return '#6366f1';
             if (node.status === 'dead') return '#cbd5e1';
+            if (this.isSequencer(node)) return '#ef4444';
+            if (this.isCore(node)) return '#f59e0b';
+            if (node.is_seed) return '#6366f1';
             if (node.status === 'suspect') return '#facc15';
             return '#10b981';
         },
 
         getStroke(node, inChannel) {
             if (!inChannel) return '#94a3b8';
-            if (node.is_seed) return '#4338ca';
             if (node.status === 'dead') return '#94a3b8';
+            if (this.isSequencer(node)) return '#dc2626';
+            if (this.isCore(node)) return '#d97706';
+            if (node.is_seed) return '#4338ca';
             if (node.status === 'suspect') return '#ca8a04';
             return '#059669';
         },

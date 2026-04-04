@@ -17,7 +17,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
+import socket
+import struct
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -53,8 +56,13 @@ class MonitorServer:
         self._nodes: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
-        # Transport (initialized in start())
+        # Transport (initialized in start()) — kept for STATUS_REQUEST
         self._transport = None
+
+        # TCP listener for status reports
+        self._tcp_thread: Optional[threading.Thread] = None
+        self._tcp_server: Optional[socket.socket] = None
+        self._tcp_stop = threading.Event()
 
         # REST API thread
         self._api_thread: Optional[threading.Thread] = None
@@ -101,6 +109,9 @@ class MonitorServer:
 
     def get_topology(self) -> Dict[str, Any]:
         """Return current network topology as JSON-serializable dict."""
+        now = time.time()
+        stale_threshold = 10.0  # seconds without a report → mark dead
+
         with self._lock:
             nodes = []
             edges = []
@@ -108,18 +119,23 @@ class MonitorServer:
 
             for nid, info in self._nodes.items():
                 data = info.get("data", {})
+                last_seen = info.get("last_seen", 0)
+                is_stale = (now - last_seen) > stale_threshold
+
+                status = "dead" if is_stale else data.get("status", "unknown")
+
                 nodes.append({
                     "id": nid,
                     "label": nid[:8],
                     "address": info.get("address", ""),
-                    "status": data.get("status", "unknown"),
+                    "status": status,
                     "is_seed": data.get("is_seed", False),
-                    "neighbour_count": data.get("neighbour_count", 0),
+                    "neighbour_count": data.get("neighbour_count", 0) if not is_stale else 0,
                     "channels": data.get("channels", []),
                     "stats": data.get("stats", {}),
-                    "core_status": data.get("core_status", {}),
-                    "sequencer_status": data.get("sequencer_status", {}),
-                    "delivery_buffers": data.get("delivery_buffers", {}),
+                    "core_status": {} if is_stale else data.get("core_status", {}),
+                    "sequencer_status": {} if is_stale else data.get("sequencer_status", {}),
+                    "delivery_buffers": {} if is_stale else data.get("delivery_buffers", {}),
                 })
 
                 for nb in data.get("neighbours", []):
@@ -278,8 +294,11 @@ class MonitorServer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the monitor's transport listener and REST API."""
-        # Determine transport type from config
+        """Start the monitor's TCP listener, transport, and REST API."""
+        # Start TCP listener for status reports on port+2
+        self._start_tcp_listener()
+
+        # Determine transport type from config (kept for STATUS_REQUEST)
         transport_type = self._config.transport
 
         if transport_type == "grpc":
@@ -303,6 +322,85 @@ class MonitorServer:
 
         # Start REST API in a background thread
         self._start_api()
+
+    def _start_tcp_listener(self) -> None:
+        """Start a TCP server that receives length-prefixed JSON status reports."""
+        tcp_port = self._port + 2
+        self._tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._tcp_server.settimeout(1.0)
+        self._tcp_server.bind((self._host, tcp_port))
+        self._tcp_server.listen(32)
+
+        def _tcp_accept_loop():
+            while not self._tcp_stop.is_set():
+                try:
+                    conn, addr = self._tcp_server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(
+                    target=self._handle_tcp_conn, args=(conn,),
+                    daemon=True, name="MonitorTCP"
+                ).start()
+
+        self._tcp_thread = threading.Thread(
+            target=_tcp_accept_loop, daemon=True, name="MonitorTCPAccept"
+        )
+        self._tcp_thread.start()
+        logger.info("[Monitor] TCP status listener on %s:%d", self._host, tcp_port)
+
+    def _handle_tcp_conn(self, conn: socket.socket) -> None:
+        """Read one length-prefixed JSON report from a TCP connection."""
+        try:
+            conn.settimeout(5.0)
+            # Read 4-byte length prefix
+            header = b""
+            while len(header) < 4:
+                chunk = conn.recv(4 - len(header))
+                if not chunk:
+                    return
+                header += chunk
+            length = struct.unpack("!I", header)[0]
+            if length > 1_000_000:  # sanity limit: 1 MB
+                return
+
+            # Read payload
+            data = b""
+            while len(data) < length:
+                chunk = conn.recv(min(length - len(data), 65536))
+                if not chunk:
+                    return
+                data += chunk
+
+            report = json.loads(data.decode("utf-8"))
+            self._ingest_status_report(report)
+        except Exception as exc:
+            logger.debug("[Monitor] TCP recv error: %s", exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _ingest_status_report(self, data: dict) -> None:
+        """Store a status report received over TCP (same logic as _handle_status_report)."""
+        node_id = data.get("node_id", "")
+        if not node_id:
+            return
+        address = data.get("address", "")
+
+        with self._lock:
+            self._nodes[node_id] = {
+                "node_id": node_id,
+                "address": address,
+                "timestamp": time.time(),
+                "last_seen": time.time(),
+                "data": data,
+            }
+
+        logger.debug("[Monitor] TCP status from %s (%s)", node_id[:8], address)
 
     def _start_api(self) -> None:
         """Start the FastAPI REST server in a background thread."""
@@ -331,7 +429,13 @@ class MonitorServer:
             logger.warning("[Monitor] REST API disabled — install with: pip install fastapi uvicorn")
 
     def stop(self) -> None:
-        """Shut down transport and API."""
+        """Shut down TCP listener, transport, and API."""
+        self._tcp_stop.set()
+        if self._tcp_server:
+            try:
+                self._tcp_server.close()
+            except Exception:
+                pass
         if self._transport:
             self._transport.stop()
         logger.info("[Monitor] Stopped")

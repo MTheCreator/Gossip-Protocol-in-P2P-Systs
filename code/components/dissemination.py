@@ -216,6 +216,12 @@ class DisseminationEngine:
         )
         self._delivery_buffers[channel] = buf
 
+        # Wire the delivery buffer into the core manager so it can
+        # check eligibility (pending_count, last_delivered_seq)
+        mgr = self._core_managers.get(channel)
+        if mgr:
+            mgr.set_delivery_buffer(buf)
+
         logger.info(
             "[Dissemination] Subscribed to '%s' (initial_seq=%d)",
             channel, initial_seq,

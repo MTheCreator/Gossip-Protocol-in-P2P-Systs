@@ -2,18 +2,21 @@
 components/status_reporter.py  —  Node-side Status Reporting
 ==============================================================
 Daemon thread that periodically sends STATUS_REPORT messages to
-the monitoring server.  Each report contains a snapshot of the
-node's current state: neighbours, edge probabilities, channel
+the monitoring server over TCP.  Each report contains a snapshot of
+the node's current state: neighbours, edge probabilities, channel
 subscriptions, delivery buffer stats, and dissemination counters.
 
-The monitor address is hardcoded in the config (MonitorConfig).
-The reporter does NOT participate in gossip — it sends a single
-unicast message to the monitor on each interval.
+Reports are sent as length-prefixed JSON over a TCP connection,
+bypassing the UDP transport entirely so large payloads are not
+constrained by datagram size limits.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import socket
+import struct
 import threading
 from typing import TYPE_CHECKING, Callable, Dict, Optional
 
@@ -32,7 +35,7 @@ SendFn = Callable[[NodeInfo, Message], bool]
 
 class StatusReporter(threading.Thread):
     """
-    Periodically sends STATUS_REPORT to the monitoring server.
+    Periodically sends STATUS_REPORT to the monitoring server over TCP.
 
     Usage:
         reporter = StatusReporter(node, send_fn, "127.0.0.1:9090", interval=5.0)
@@ -58,12 +61,21 @@ class StatusReporter(threading.Thread):
         self._core_managers: Dict[str, "CoreNodeManager"] = {}
         self._election_managers: Dict[str, "ElectionManager"] = {}
 
-        # Parse monitor address
+        # Parse monitor address — TCP reports go to monitor_port + 2
+        self._monitor_tcp_host: Optional[str] = None
+        self._monitor_tcp_port: Optional[int] = None
+        try:
+            host, port_str = monitor_address.rsplit(":", 1)
+            self._monitor_tcp_host = host
+            self._monitor_tcp_port = int(port_str) + 2  # TCP on port+2
+        except (ValueError, AttributeError):
+            logger.error("[StatusReporter] Invalid monitor address: %s", monitor_address)
+
+        # Also keep NodeInfo for backward compat (unused now but kept for STATUS_REQUEST)
         try:
             host, port_str = monitor_address.rsplit(":", 1)
             self._monitor_info = NodeInfo.from_address(host, int(port_str))
         except (ValueError, AttributeError):
-            logger.error("[StatusReporter] Invalid monitor address: %s", monitor_address)
             self._monitor_info = None
 
     def set_engine(self, engine: "DisseminationEngine") -> None:
@@ -83,11 +95,29 @@ class StatusReporter(threading.Thread):
             self._monitor_info.address if self._monitor_info else "NONE",
         )
         while not self._stop_event.wait(self._interval):
-            self._report()
+            try:
+                self._report()
+            except Exception as exc:
+                logger.warning("[StatusReporter] Report failed: %s", exc)
+
+    def _send_tcp(self, data: dict) -> None:
+        """Send a JSON payload to the monitor over TCP with a 4-byte length prefix."""
+        if self._monitor_tcp_host is None or self._monitor_tcp_port is None:
+            return
+        try:
+            payload = json.dumps(data).encode("utf-8")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((self._monitor_tcp_host, self._monitor_tcp_port))
+            sock.sendall(struct.pack("!I", len(payload)) + payload)
+            sock.close()
+        except Exception as exc:
+            logger.debug("[StatusReporter] TCP send failed: %s", exc)
 
     def _report(self) -> None:
-        """Build and send a status report to the monitor."""
-        if self._monitor_info is None:
+        """Build and send a status report to the monitor over TCP."""
+        if self._monitor_tcp_host is None:
+            print("something wrong here")
             return
 
         status_data = {
@@ -105,8 +135,8 @@ class StatusReporter(threading.Thread):
                 }
                 for e in self._node.all_neighbours()
             ],
-            "channels": list(self._node._subscriptions),
-            "stats": self._engine.stats if self._engine else {},
+            "channels": list(self._node._subscriptions.copy()),
+            "stats": dict(self._engine.stats) if self._engine else {},
             "status": "alive",
         }
 
@@ -153,11 +183,9 @@ class StatusReporter(threading.Thread):
             if delivered_msgs:
                 status_data["delivered_messages"] = delivered_msgs
 
-        report_msg = self._node.factory.status_report(status_data)
-        try:
-            self._send_fn(self._monitor_info, report_msg)
-        except Exception as exc:
-            logger.debug("[StatusReporter] Failed to send report: %s", exc)
+        # Send over TCP (length-prefixed JSON)
+        print(status_data["node_id"])
+        self._send_tcp(status_data)
 
     def stop(self) -> None:
         self._stop_event.set()
