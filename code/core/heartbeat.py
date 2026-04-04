@@ -120,9 +120,15 @@ class HeartbeatReceiver:
     def _handle_heartbeat(self, msg: Message, sender_info: Optional[NodeInfo]) -> None:
         sender_id = msg.sender_id
 
-        # If we don't know this sender yet and we have room, add them
+        # If we don't know this sender yet, try to add them.
+        # Seed nodes use a higher fmax to accept more connections.
         if sender_info and not self.node.get_neighbour(sender_id):
-            if self.node.neighbour_count < self.node.config.gossip.fmax:
+            if self.node.is_seed_node:
+                max_neighbours = self.node.config.discovery.seed_fmax_override
+            else:
+                max_neighbours = self.node.config.gossip.fmax
+
+            if self.node.neighbour_count < max_neighbours:
                 self.node.add_neighbour(sender_info)
                 logger.info("[HB-Receiver] auto-added new neighbour %s", sender_id[:8])
 

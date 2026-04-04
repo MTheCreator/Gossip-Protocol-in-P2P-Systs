@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gossip Protocol — Live Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles/main.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/vis-network/styles/vis-network.min.css">
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+    <div id="dashboard-fallback" class="dashboard-fallback">
+        <div class="dashboard-fallback-card">
+            <div class="dashboard-fallback-title">Gossip Protocol Dashboard</div>
+            <div class="dashboard-fallback-text">The dashboard is starting. If this stays visible, check that Vue, vis-network, and the monitor API are available.</div>
+        </div>
+    </div>
+    <div id="app" :class="{ loaded: appReady }">
+
+        <!-- ====== Top Navigation Bar ====== -->
+        <nav class="topbar">
+            <div class="topbar-brand">
+                <div class="brand-icon">
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                        <circle cx="14" cy="6" r="3" fill="#6366f1"/>
+                        <circle cx="6" cy="20" r="3" fill="#8b5cf6"/>
+                        <circle cx="22" cy="20" r="3" fill="#a78bfa"/>
+                        <line x1="14" y1="6" x2="6" y2="20" stroke="#6366f1" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="14" y1="6" x2="22" y2="20" stroke="#8b5cf6" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="6" y1="20" x2="22" y2="20" stroke="#a78bfa" stroke-width="1.5" opacity="0.5"/>
+                    </svg>
+                </div>
+                <span class="brand-text">Gossip Protocol</span>
+                <span class="brand-sub">Live Monitor</span>
+            </div>
+
+            <div class="topbar-nav">
+                <button class="nav-pill" :class="{ active: activeTab === 'overview' }"
+                        @click="activeTab = 'overview'">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <rect x="1" y="1" width="6" height="6" rx="1.5"/>
+                        <rect x="9" y="1" width="6" height="6" rx="1.5"/>
+                        <rect x="1" y="9" width="6" height="6" rx="1.5"/>
+                        <rect x="9" y="9" width="6" height="6" rx="1.5"/>
+                    </svg>
+                    Overview
+                </button>
+                <button class="nav-pill" :class="{ active: activeTab === 'graph' }"
+                        @click="activeTab = 'graph'">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <circle cx="4" cy="4" r="2.5"/>
+                        <circle cx="12" cy="4" r="2.5"/>
+                        <circle cx="8" cy="12" r="2.5"/>
+                        <line x1="4" y1="4" x2="12" y2="4" stroke="currentColor" stroke-width="1"/>
+                        <line x1="4" y1="4" x2="8" y2="12" stroke="currentColor" stroke-width="1"/>
+                        <line x1="12" y1="4" x2="8" y2="12" stroke="currentColor" stroke-width="1"/>
+                    </svg>
+                    Topology
+                </button>
+                <button class="nav-pill" :class="{ active: activeTab === 'channels' }"
+                        @click="activeTab = 'channels'">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+                    </svg>
+                    Channels
+                </button>
+            </div>
+
+            <div class="topbar-status">
+                <div class="status-pill" :class="connected ? 'online' : 'offline'">
+                    <span class="pulse-dot"></span>
+                    {{ connected ? 'Live' : 'Offline' }}
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-chip-value">{{ topology.nodes.length }}</span>
+                    <span class="stat-chip-label">nodes</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-chip-value">{{ topology.edges.length }}</span>
+                    <span class="stat-chip-label">edges</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- ====== Main Content Area ====== -->
+        <main class="main-content">
+
+            <!-- ===== Overview Tab ===== -->
+            <transition name="tab-fade" mode="out-in">
+            <section v-if="activeTab === 'overview'" key="overview" class="view-section">
+                <!-- KPI Strip -->
+                <div class="kpi-strip">
+                    <div class="kpi-card" v-for="kpi in kpis" :key="kpi.label">
+                        <div class="kpi-icon" :style="{ background: kpi.bg }">
+                            <span v-html="kpi.icon"></span>
+                        </div>
+                        <div class="kpi-body">
+                            <span class="kpi-value">{{ kpi.value }}</span>
+                            <span class="kpi-label">{{ kpi.label }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Two-column: mini graph + channel list -->
+                <div class="overview-grid">
+                    <div class="overview-graph-card glass-card">
+                        <div class="card-header">
+                            <h3>Network Topology</h3>
+                            <button class="text-btn" @click="activeTab = 'graph'">Expand</button>
+                        </div>
+                        <div class="mini-graph-wrap">
+                            <network-graph
+                                :topology="topology"
+                                :selected-channel="''"
+                                :channel-detail="null"
+                                :mini="true"
+                                @node-click="onNodeClick">
+                            </network-graph>
+                        </div>
+                    </div>
+                    <div class="overview-channels-card glass-card">
+                        <div class="card-header">
+                            <h3>Active Channels</h3>
+                            <span class="chip">{{ channels.length }}</span>
+                        </div>
+                        <channel-list
+                            :channels="channels"
+                            @select="onChannelSelect">
+                        </channel-list>
+                    </div>
+                </div>
+            </section>
+            </transition>
+
+            <!-- ===== Topology Tab ===== -->
+            <transition name="tab-fade" mode="out-in">
+            <section v-if="activeTab === 'graph'" key="graph" class="view-section">
+                <div class="graph-toolbar glass-card">
+                    <div class="toolbar-group">
+                        <label class="toolbar-label">Channel Overlay</label>
+                        <div class="select-wrap">
+                            <select v-model="selectedChannel" @change="onChannelOverlayChange">
+                                <option value="">All Nodes</option>
+                                <option v-for="ch in channels" :key="ch.name" :value="ch.name">
+                                    {{ ch.name }} ({{ ch.total_subscribers }} subscribers)
+                                </option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="legend-inline">
+                        <span class="legend-item"><span class="dot dot-alive"></span>Alive</span>
+                        <span class="legend-item"><span class="dot dot-seed"></span>Seed</span>
+                        <span class="legend-item"><span class="dot dot-core"></span>Core</span>
+                        <span class="legend-item"><span class="dot dot-sequencer"></span>Sequencer</span>
+                        <span class="legend-item"><span class="dot dot-suspect"></span>Suspect</span>
+                        <span class="legend-item"><span class="dot dot-dead"></span>Dead</span>
+                    </div>
+                </div>
+
+                <div class="graph-viewport glass-card">
+                    <network-graph
+                        :topology="topology"
+                        :selected-channel="selectedChannel"
+                        :channel-detail="channelDetail"
+                        @node-click="onNodeClick">
+                    </network-graph>
+
+                    <!-- Node detail slide-in -->
+                    <transition name="slide-right">
+                        <node-detail
+                            v-if="selectedNode"
+                            :node="selectedNode"
+                            :channels="channels"
+                            @close="selectedNode = null"
+                            @show-messages="showNodeMessages">
+                        </node-detail>
+                    </transition>
+                </div>
+            </section>
+            </transition>
+
+            <!-- ===== Channels Tab ===== -->
+            <transition name="tab-fade" mode="out-in">
+            <section v-if="activeTab === 'channels'" key="channels" class="view-section">
+                <channel-list
+                    :channels="channels"
+                    @select="onChannelSelect">
+                </channel-list>
+
+                <transition name="slide-up">
+                    <channel-view
+                        v-if="selectedChannelForView"
+                        :channel="selectedChannelForView"
+                        :detail="channelDetail"
+                        @close="selectedChannelForView = null">
+                    </channel-view>
+                </transition>
+            </section>
+            </transition>
+        </main>
+
+        <!-- ====== Message Modal ====== -->
+        <transition name="modal-fade">
+        <div v-if="messageModal.visible" class="modal-overlay" @click.self="messageModal.visible = false">
+            <div class="modal glass-card">
+                <div class="modal-header">
+                    <div>
+                        <h3>Message Stream</h3>
+                        <p class="modal-subtitle">
+                            {{ messageModal.channel }} &middot; node {{ messageModal.nodeId.substring(0, 8) }}
+                        </p>
+                    </div>
+                    <button class="icon-btn" @click="messageModal.visible = false">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="5" y1="5" x2="15" y2="15"/><line x1="15" y1="5" x2="5" y2="15"/>
+                        </svg>
+                    </button>
+                </div>
+                <message-history
+                    :messages="messageModal.messages"
+                    :last-delivered-seq="messageModal.lastDeliveredSeq">
+                </message-history>
+            </div>
+        </div>
+        </transition>
+    </div>
+
+    <!-- Vue Components -->
+    <script src="/static/components/NetworkGraph.js"></script>
+    <script src="/static/components/ChannelList.js"></script>
+    <script src="/static/components/ChannelView.js"></script>
+    <script src="/static/components/NodeDetail.js"></script>
+    <script src="/static/components/MessageHistory.js"></script>
+    <script src="/static/vue-app.js"></script>
+</body>
+</html>

@@ -157,42 +157,65 @@ class PeerDiscovery:
 
     def join_network(self) -> bool:
         """
-        Attempt to join the overlay using the priority list:
-          1. Cached peers
-          2. Hardcoded seeds
-          3. (peer exchange happens automatically on first connection)
+        Attempt to join the overlay.  Unlike the previous implementation that
+        stopped after a single successful contact, this version tries ALL
+        reachable peers until fmin <= neighbour_count <= fmax.
+
+        Priority:
+          1. Cached peers (from peers.json)
+          2. Hardcoded seed nodes
+          3. Peer exchange with any connected neighbour
 
         Returns True if at least one peer was successfully contacted.
         """
         logger.info("[Discovery] === Joining network ===")
 
-        # Step 1: Try cached peers
+        # Step 1: Try all cached peers — add as many as possible
         cached = self.cache.load()
         if cached:
             logger.info("[Discovery] Step 1: Trying %d cached peers", len(cached))
-            if self._try_connect_peers(cached):
-                return True
-            logger.info("[Discovery] All cached peers unreachable")
+            added = self._try_connect_all(cached)
+            logger.info("[Discovery] Added %d peers from cache", added)
 
-        # Step 2: Try hardcoded seeds
-        seed_peers = self._seeds_to_node_infos()
-        if seed_peers:
-            logger.info("[Discovery] Step 2: Trying %d seed nodes", len(seed_peers))
-            if self._try_connect_peers(seed_peers):
-                return True
-            logger.warning("[Discovery] All seed nodes unreachable")
+        # Step 2: If still below fmin, try seed nodes
+        if self.node.needs_more_neighbours():
+            seed_peers = self._seeds_to_node_infos()
+            if seed_peers:
+                logger.info("[Discovery] Step 2: Trying %d seed nodes", len(seed_peers))
+                added = self._try_connect_all(seed_peers)
+                logger.info("[Discovery] Added %d peers from seeds", added)
+
+        # Step 3: If connected to anyone but still below fmin, do peer exchange
+        if self.node.neighbour_count > 0 and self.node.needs_more_neighbours():
+            logger.info("[Discovery] Step 3: Peer exchange to reach fmin")
+            self._peer_exchange_and_connect()
+
+        if self.node.neighbour_count > 0:
+            logger.info(
+                "[Discovery] Joined network with %d neighbours (fmin=%d)",
+                self.node.neighbour_count, self.node.config.gossip.fmin,
+            )
+            return True
 
         logger.error("[Discovery] Failed to join — no reachable peers or seeds")
         return False
 
-    def _try_connect_peers(self, candidates: List[NodeInfo]) -> bool:
+    def _try_connect_all(self, candidates: List[NodeInfo]) -> int:
         """
-        Attempt to connect to each candidate in order.
-        On first success: add as neighbour, request peer exchange, return True.
+        Try to connect to ALL candidates.  Adds every reachable peer as a
+        neighbour (up to fmax).  Returns the number of newly added peers.
         """
+        added = 0
         for peer in candidates:
             if peer.node_id == self.node.node_id:
                 continue  # don't connect to ourselves
+
+            if self.node.neighbour_count >= self.node.config.gossip.fmax:
+                logger.debug("[Discovery] fmax reached, stopping connection attempts")
+                break
+
+            if self.node.get_neighbour(peer.node_id) is not None:
+                continue  # already a neighbour
 
             logger.debug("[Discovery] Trying peer %s (%s)", peer.node_id[:8], peer.address)
 
@@ -209,24 +232,29 @@ class PeerDiscovery:
                 continue
 
             # Success — add as neighbour
-            added = self.node.add_neighbour(peer)
-            if added:
+            if self.node.add_neighbour(peer):
+                added += 1
                 logger.info(
-                    "[Discovery] Connected to %s (%s)",
+                    "[Discovery] Connected to %s (%s) [%d/%d]",
                     peer.node_id[:8], peer.address,
-                )
-            else:
-                logger.debug(
-                    "[Discovery] Peer %s not added (fmax reached?)",
-                    peer.node_id[:8],
+                    self.node.neighbour_count, self.node.config.gossip.fmax,
                 )
 
-            # Request peer exchange
-            self._request_peer_list(peer)
+        # Request peer exchange from all newly connected peers
+        if added > 0:
+            for entry in self.node.alive_neighbours():
+                self._request_peer_list(entry.info)
 
-            return True
+        return added
 
-        return False
+    def _peer_exchange_and_connect(self) -> None:
+        """
+        Request peer lists from all current neighbours and attempt to connect
+        to the results.  Used as a third-tier strategy when cache and seeds
+        are insufficient to reach fmin.
+        """
+        for entry in self.node.alive_neighbours():
+            self._request_peer_list(entry.info)
 
     def _seeds_to_node_infos(self) -> List[NodeInfo]:
         """Convert seed address strings ("host:port") to NodeInfo objects."""
@@ -335,6 +363,10 @@ class PeerDiscovery:
         """
         Called when a neighbour is declared dead or an edge dies.
         If neighbour count < fmin, attempt to find new peers.
+
+        Strategy:
+          1. Ask ALL alive neighbours for their peer lists.
+          2. If no alive neighbours remain, fall back to a full join_network().
         """
         if dead_peer:
             logger.info(
@@ -354,11 +386,11 @@ class PeerDiscovery:
             self.node.neighbour_count, self.node.config.gossip.fmin,
         )
 
-        # Strategy 1: Ask an existing alive neighbour for their peer list
+        # Strategy 1: Ask ALL alive neighbours for their peer lists
         alive = self.node.alive_neighbours()
         if alive:
-            target = random.choice(alive)
-            self._request_peer_list(target.info)
+            for entry in alive:
+                self._request_peer_list(entry.info)
             return
 
         # Strategy 2: No alive neighbours — fall back to full join

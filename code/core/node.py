@@ -162,6 +162,11 @@ class LocalNode:
     def address(self) -> str:
         return self.info.address
 
+    @property
+    def is_seed_node(self) -> bool:
+        """True if this node's address matches one of the configured seed nodes."""
+        return self.info.address in self.config.discovery.seed_nodes
+
     # ------------------------------------------------------------------
     # Neighbour management
     # ------------------------------------------------------------------

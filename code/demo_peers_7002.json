@@ -1,0 +1,17 @@
+[
+  {
+    "node_id": "73e424d53fc3edc27f2c55eb2808f7bdd833f129",
+    "host": "127.0.0.1",
+    "port": 7001
+  },
+  {
+    "node_id": "7d4851f44d8545c53c944f280ba6cda05620b163",
+    "host": "127.0.0.1",
+    "port": 7002
+  },
+  {
+    "node_id": "cce8d32fbd03648f396de4fcd3d031f14bb9f9f5",
+    "host": "127.0.0.1",
+    "port": 7003
+  }
+]
