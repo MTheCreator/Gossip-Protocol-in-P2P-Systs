@@ -54,6 +54,10 @@ class MonitorServer:
 
         # Aggregated state
         self._nodes: Dict[str, Dict[str, Any]] = {}
+        self._traffic_events: List[Dict[str, Any]] = []
+        self._next_traffic_id = 1
+        self._traffic_ttl_sec = 12.0
+        self._traffic_max_events = 10000
         self._lock = threading.Lock()
 
         # Transport (initialized in start()) — kept for STATUS_REQUEST
@@ -100,6 +104,7 @@ class MonitorServer:
                 "last_seen": time.time(),
                 "data": data,
             }
+            self._ingest_traffic_events_unlocked(node_id=node_id, report=data)
 
         logger.debug("[Monitor] Received status from %s (%s)", node_id[:8], address)
 
@@ -115,7 +120,7 @@ class MonitorServer:
         with self._lock:
             nodes = []
             edges = []
-            seen_edges = set()
+            node_status: Dict[str, str] = {}
 
             for nid, info in self._nodes.items():
                 data = info.get("data", {})
@@ -123,6 +128,7 @@ class MonitorServer:
                 is_stale = (now - last_seen) > stale_threshold
 
                 status = "dead" if is_stale else data.get("status", "unknown")
+                node_status[nid] = status
 
                 nodes.append({
                     "id": nid,
@@ -138,18 +144,30 @@ class MonitorServer:
                     "delivery_buffers": {} if is_stale else data.get("delivery_buffers", {}),
                 })
 
+            # Keep directed neighbour links so the UI can render per-direction
+            # heartbeat/broadcast activity.
+            for nid, info in self._nodes.items():
+                data = info.get("data", {})
+                src_status = node_status.get(nid, "unknown")
+                if src_status == "dead":
+                    continue
+
                 for nb in data.get("neighbours", []):
                     nb_id = nb.get("node_id", "")
-                    edge_key = tuple(sorted([nid, nb_id]))
-                    if edge_key not in seen_edges:
-                        seen_edges.add(edge_key)
-                        edges.append({
-                            "source": nid,
-                            "target": nb_id,
-                            "probability": nb.get("edge_prob", 1.0),
-                            "reliability": nb.get("reliability_score", 1.0),
-                            "status": nb.get("status", "alive"),
-                        })
+                    if not nb_id or nb_id == nid:
+                        continue
+
+                    edges.append({
+                        "id": f"{nid}->{nb_id}",
+                        "source": nid,
+                        "target": nb_id,
+                        "directed": True,
+                        "probability": nb.get("edge_prob", 1.0),
+                        "reliability": nb.get("reliability_score", 1.0),
+                        "status": nb.get("status", "alive"),
+                        "source_status": src_status,
+                        "target_status": node_status.get(nb_id, "unknown"),
+                    })
 
             return {"nodes": nodes, "edges": edges}
 
@@ -289,6 +307,20 @@ class MonitorServer:
             data = info.get("data", {})
             return data.get("delivered_messages", {}).get(channel, [])
 
+    def get_traffic(self, since_id: int = 0) -> Dict[str, Any]:
+        """
+        Return recent directed send events used by edge-flow animations.
+        Events are ephemeral and trimmed by age + max size.
+        """
+        with self._lock:
+            self._prune_traffic_unlocked()
+            events = [
+                dict(ev) for ev in self._traffic_events
+                if ev.get("id", 0) > since_id
+            ]
+            latest_id = self._next_traffic_id - 1
+            return {"events": events, "latest_id": latest_id}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -399,8 +431,58 @@ class MonitorServer:
                 "last_seen": time.time(),
                 "data": data,
             }
+            self._ingest_traffic_events_unlocked(node_id=node_id, report=data)
 
         logger.debug("[Monitor] TCP status from %s (%s)", node_id[:8], address)
+
+    def _ingest_traffic_events_unlocked(self, node_id: str, report: Dict[str, Any]) -> None:
+        """Ingest transient send events from one status report. Caller holds _lock."""
+        raw_events = report.get("traffic_events", [])
+        if not isinstance(raw_events, list) or not raw_events:
+            self._prune_traffic_unlocked()
+            return
+
+        now = time.time()
+        for ev in raw_events:
+            if not isinstance(ev, dict):
+                continue
+
+            source_id = str(ev.get("source_id") or node_id)
+            target_id = str(ev.get("target_id") or "")
+            msg_type = str(ev.get("msg_type") or "")
+            channel = str(ev.get("channel") or "")
+            if not source_id or not target_id or not msg_type:
+                continue
+
+            ts_raw = ev.get("ts")
+            try:
+                ts = float(ts_raw) if ts_raw is not None else now
+            except (TypeError, ValueError):
+                ts = now
+            if ts <= 0 or ts > now + 30:
+                ts = now
+
+            self._traffic_events.append({
+                "id": self._next_traffic_id,
+                "ts": ts,
+                "source_id": source_id,
+                "target_id": target_id,
+                "msg_type": msg_type,
+                "channel": channel,
+            })
+            self._next_traffic_id += 1
+
+        self._prune_traffic_unlocked()
+
+    def _prune_traffic_unlocked(self) -> None:
+        """Drop stale traffic events. Caller holds _lock."""
+        cutoff = time.time() - self._traffic_ttl_sec
+        if self._traffic_events:
+            self._traffic_events = [
+                ev for ev in self._traffic_events if ev.get("ts", 0) >= cutoff
+            ]
+            if len(self._traffic_events) > self._traffic_max_events:
+                self._traffic_events = self._traffic_events[-self._traffic_max_events:]
 
     def _start_api(self) -> None:
         """Start the FastAPI REST server in a background thread."""

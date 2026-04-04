@@ -18,7 +18,7 @@ import logging
 import socket
 import struct
 import threading
-from typing import TYPE_CHECKING, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from core.node import LocalNode, NodeInfo
 from core.message import Message
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SendFn = Callable[[NodeInfo, Message], bool]
+TrafficFn = Callable[[], List[Dict[str, Any]]]
 
 
 class StatusReporter(threading.Thread):
@@ -51,6 +52,7 @@ class StatusReporter(threading.Thread):
         send_fn: SendFn,
         monitor_address: str,
         interval: float = 5.0,
+        get_traffic_events: Optional[TrafficFn] = None,
     ) -> None:
         super().__init__(daemon=True, name=f"StatusReporter-{node.node_id[:8]}")
         self._node = node
@@ -60,6 +62,7 @@ class StatusReporter(threading.Thread):
         self._engine: Optional["DisseminationEngine"] = None
         self._core_managers: Dict[str, "CoreNodeManager"] = {}
         self._election_managers: Dict[str, "ElectionManager"] = {}
+        self._get_traffic_events = get_traffic_events
 
         # Parse monitor address — TCP reports go to monitor_port + 2
         self._monitor_tcp_host: Optional[str] = None
@@ -181,6 +184,12 @@ class StatusReporter(threading.Thread):
                     delivered_msgs[ch] = msgs
             if delivered_msgs:
                 status_data["delivered_messages"] = delivered_msgs
+
+        # Lightweight per-send traffic events (for edge flow animations).
+        if self._get_traffic_events:
+            events = self._get_traffic_events()
+            if events:
+                status_data["traffic_events"] = events
 
         # Send over TCP (length-prefixed JSON)
         self._send_tcp(status_data)

@@ -13,6 +13,8 @@ const app = createApp({
             activeTab: 'overview',
             connected: false,
             topology: { nodes: [], edges: [] },
+            trafficEvents: [],
+            lastTrafficId: 0,
             channels: [],
             selectedChannel: '',
             channelDetail: null,
@@ -91,9 +93,10 @@ const app = createApp({
     methods: {
         async poll() {
             try {
-                const [topoRes, chRes] = await Promise.all([
+                const [topoRes, chRes, trafficRes] = await Promise.all([
                     fetch('/api/topology'),
                     fetch('/api/channels'),
+                    fetch(`/api/traffic?since_id=${encodeURIComponent(this.lastTrafficId)}`),
                 ]);
                 if (topoRes.ok) {
                     this.topology = await topoRes.json();
@@ -101,6 +104,43 @@ const app = createApp({
                 }
                 if (chRes.ok) {
                     this.channels = await chRes.json();
+                }
+                if (trafficRes.ok) {
+                    const payload = await trafficRes.json();
+                    const fresh = Array.isArray(payload)
+                        ? payload
+                        : (Array.isArray(payload.events) ? payload.events : []);
+                    const latest = Array.isArray(payload)
+                        ? 0
+                        : (typeof payload.latest_id === 'number' ? payload.latest_id : 0);
+
+                    if (latest > this.lastTrafficId) {
+                        this.lastTrafficId = latest;
+                    } else if (fresh.length > 0) {
+                        const maxSeen = Math.max(
+                            this.lastTrafficId,
+                            ...fresh.map(ev => (typeof ev.id === 'number' ? ev.id : 0)),
+                        );
+                        this.lastTrafficId = maxSeen;
+                    }
+
+                    if (fresh.length > 0) {
+                        const arrivalMs = Date.now();
+                        const enriched = fresh.map(ev => ({
+                            ...ev,
+                            arrival_ms: arrivalMs,
+                        }));
+                        this.trafficEvents = this.trafficEvents.concat(enriched);
+                    }
+
+                    const cutoffSec = (Date.now() / 1000) - 15;
+                    this.trafficEvents = this.trafficEvents.filter(ev => {
+                        const ts = typeof ev.ts === 'number' ? ev.ts : Number(ev.ts);
+                        return Number.isFinite(ts) ? ts >= cutoffSec : true;
+                    });
+                    if (this.trafficEvents.length > 6000) {
+                        this.trafficEvents = this.trafficEvents.slice(-4000);
+                    }
                 }
 
                 if (this.selectedChannel) {

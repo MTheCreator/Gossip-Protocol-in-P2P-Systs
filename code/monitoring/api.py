@@ -5,6 +5,7 @@ Minimal FastAPI app that exposes the MonitorServer's aggregated data.
 
 Endpoints:
   GET /api/topology              — full network graph (nodes + edges)
+  GET /api/traffic               — recent directed send events for edge animations
   GET /api/nodes                 — list all known nodes
   GET /api/nodes/{node_id}       — detail for one node
   GET /api/channels              — all channels with metrics
@@ -56,6 +57,11 @@ def create_app(monitor: "MonitorServer") -> FastAPI:
     def topology():
         """Full network topology: nodes + edges with probabilities."""
         return monitor.get_topology()
+
+    @app.get("/api/traffic")
+    def traffic(since_id: int = 0):
+        """Recent edge traffic events (heartbeat + gossip) since optional event id."""
+        return monitor.get_traffic(since_id=since_id)
 
     @app.get("/api/nodes")
     def nodes():

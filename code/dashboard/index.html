@@ -115,6 +115,7 @@
                         <div class="mini-graph-wrap">
                             <network-graph
                                 :topology="topology"
+                                :traffic-events="trafficEvents"
                                 :selected-channel="''"
                                 :channel-detail="null"
                                 :mini="true"
@@ -164,6 +165,7 @@
                 <div class="graph-viewport glass-card">
                     <network-graph
                         :topology="topology"
+                        :traffic-events="trafficEvents"
                         :selected-channel="selectedChannel"
                         :channel-detail="channelDetail"
                         @node-click="onNodeClick">

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from config.udp_config import UDPConfig, get_udp_config
 from config.base_config import ChannelConfig
@@ -75,9 +75,16 @@ class UDPServer:
         # Transport
         self.transport = UDPTransport(self.config, host=host, port=port)
 
+        # Recent successful send events (used only for dashboard animation).
+        self._traffic_lock = threading.Lock()
+        self._traffic_events: List[Dict[str, Any]] = []
+
         # send_fn: the universal callable used by all components
         def send_fn(peer: NodeInfo, msg: Message) -> bool:
-            return self.transport.send(peer, msg)
+            ok = self.transport.send(peer, msg)
+            if ok:
+                self._record_traffic_event(peer, msg)
+            return ok
 
         self._send_fn = send_fn
 
@@ -367,6 +374,36 @@ class UDPServer:
             except Exception:
                 pass
 
+    def _record_traffic_event(self, peer: NodeInfo, msg: Message) -> None:
+        """Record successful directed sends for dashboard edge-flow animation."""
+        if msg.msg_type not in (
+            MessageType.HEARTBEAT,
+            MessageType.HEARTBEAT_ACK,
+            MessageType.SEQUENCER_HEARTBEAT,
+            MessageType.GOSSIP,
+            MessageType.SEQUENCE_ASSIGN,
+        ):
+            return
+
+        event = {
+            "ts": time.time(),
+            "source_id": self.node.node_id,
+            "target_id": peer.node_id,
+            "msg_type": msg.msg_type.name,
+            "channel": msg.channel or "",
+        }
+        with self._traffic_lock:
+            self._traffic_events.append(event)
+            if len(self._traffic_events) > 3000:
+                self._traffic_events = self._traffic_events[-2000:]
+
+    def _drain_traffic_events(self) -> List[Dict[str, Any]]:
+        """Return and clear buffered traffic events."""
+        with self._traffic_lock:
+            events = self._traffic_events
+            self._traffic_events = []
+        return events
+
     # ------------------------------------------------------------------
     # Message routing
     # ------------------------------------------------------------------
@@ -559,6 +596,7 @@ class UDPServer:
                     send_fn=self._send_fn,
                     monitor_address=self.config.monitor.monitor_address,
                     interval=self.config.monitor.report_interval,
+                    get_traffic_events=self._drain_traffic_events,
                 )
                 self.status_reporter.set_engine(self.engine)
                 self.status_reporter.set_core_managers(self._core_managers)
