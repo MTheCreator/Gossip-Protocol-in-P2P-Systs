@@ -65,22 +65,22 @@ CHANNELS = [
         election_timeout=60.0,
         core_join_min_seq=3,
     ),
-    # ChannelConfig(
-    #     channel_name="channel_testing_batch",
-    #     history_batch_size=50,
-    #     sequencer_heartbeat_interval=1.0,
-    #     sequencer_heartbeat_timeout=4.0,
-    #     election_timeout=60.0,
-    #     core_join_min_seq=3,
-    # ),
-    # ChannelConfig(
-    #     channel_name="channel_general_announcement",
-    #     history_batch_size=50,
-    #     sequencer_heartbeat_interval=1.0,
-    #     sequencer_heartbeat_timeout=4.0,
-    #     election_timeout=60.0,
-    #     core_join_min_seq=3,
-    # ),
+    ChannelConfig(
+        channel_name="channel_testing_batch",
+        history_batch_size=50,
+        sequencer_heartbeat_interval=1.0,
+        sequencer_heartbeat_timeout=4.0,
+        election_timeout=60.0,
+        core_join_min_seq=3,
+    ),
+    ChannelConfig(
+        channel_name="channel_general_announcement",
+        history_batch_size=50,
+        sequencer_heartbeat_interval=1.0,
+        sequencer_heartbeat_timeout=4.0,
+        election_timeout=60.0,
+        core_join_min_seq=3,
+    ),
 ]
 START_PORT = 7001
 NODE_COUNT = 10

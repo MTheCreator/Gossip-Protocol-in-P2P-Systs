@@ -57,30 +57,9 @@ HOST = "127.0.0.1"
 MONITOR_PORT = 9090
 SEED_NODES = [7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008, 7009, 7010]
 CHANNELS = [
-    ChannelConfig(
-        channel_name="channel_gradient_1",
-        history_batch_size=50,
-        sequencer_heartbeat_interval=1.0,
-        sequencer_heartbeat_timeout=4.0,
-        election_timeout=60.0,
-        core_join_min_seq=3,
-    ),
-    ChannelConfig(
-        channel_name="channel_testing_batch",
-        history_batch_size=50,
-        sequencer_heartbeat_interval=1.0,
-        sequencer_heartbeat_timeout=4.0,
-        election_timeout=60.0,
-        core_join_min_seq=3,
-    ),
-    ChannelConfig(
-        channel_name="channel_general_announcement",
-        history_batch_size=50,
-        sequencer_heartbeat_interval=1.0,
-        sequencer_heartbeat_timeout=4.0,
-        election_timeout=60.0,
-        core_join_min_seq=3,
-    ),
+    "channel_gradient_1",
+    "channel_testing_batch",
+    "channel_general_announcement",
 ]
 START_PORT = 7020
 NODE_COUNT = 10
@@ -111,7 +90,16 @@ class DemoCluster:
                 revival_threshold=0.2,
             ),
             channels=[
-                channel for i, channel in enumerate(CHANNELS) if port % (i + 1) == 0
+                ChannelConfig(
+                    channel_name=channel,
+                    history_batch_size=50,
+                    sequencer_heartbeat_interval=1.0,
+                    sequencer_heartbeat_timeout=4.0,
+                    election_timeout=10.0,
+                    core_join_min_seq=random.randint(1, 5000),
+                )
+                for i, channel in enumerate(CHANNELS)
+                if port % (i + 1) == 0
             ],
             bootstrap=BootstrapConfig(
                 bootstrap_wait=5.0,
@@ -166,7 +154,7 @@ class DemoCluster:
             server.start()
             for channel in channels:
                 server.engine.subscribe_channel(
-                    channel.channel_name,
+                    channel,
                     callback=lambda msg, p=port: log.info(
                         "  [:%d] DELIVER seq=%s", p, msg.metadata.get("seq_num", "?")
                     ),
@@ -203,11 +191,7 @@ class DemoCluster:
             return sorted(self._servers.keys())
 
     def _channels_for_port(self, port: int):
-        return [
-            channel.channel_name
-            for i, channel in enumerate(CHANNELS)
-            if port % (i + 1) == 0
-        ]
+        return [channel for i, channel in enumerate(CHANNELS) if port % (i + 1) == 0]
 
     def print_status(self) -> None:
         running = set(self.running_ports())

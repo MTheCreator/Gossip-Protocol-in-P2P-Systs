@@ -36,10 +36,12 @@ const NetworkGraph = {
                 </div>
 
                 <svg
+                    ref="graphSvg"
                     v-else
                     class="graph-fallback-svg"
                     viewBox="0 0 1200 800"
                     preserveAspectRatio="xMidYMid meet"
+                    @contextmenu.prevent
                     @wheel.prevent="onWheel"
                     @mousedown="startPan"
                     @mousemove="onPan"
@@ -151,11 +153,20 @@ const NetworkGraph = {
             panX: 0,
             panY: 0,
             panning: false,
+            pushing: false,
             lastMouseX: 0,
             lastMouseY: 0,
             animPhase: 0,
             animTimer: null,
             frameNow: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+            lastFrameNow: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+            physicsNodes: {},
+            pointerPush: {
+                active: false,
+                x: 600,
+                y: 400,
+                impulse: 1,
+            },
         };
     },
 
@@ -180,19 +191,12 @@ const NetworkGraph = {
             const nodes = this.topology.nodes || [];
             if (nodes.length === 0) return [];
 
-            const cols = Math.max(2, Math.ceil(Math.sqrt(nodes.length)));
-            const rows = Math.max(1, Math.ceil(nodes.length / cols));
-            const xGap = 980 / Math.max(1, cols - 1);
-            const yGap = 620 / Math.max(1, rows - 1);
+            this.syncPhysicsNodes(nodes);
 
             return nodes.map((node, index) => {
-                const row = Math.floor(index / cols);
-                const col = index % cols;
-                const baseX = 110 + col * xGap;
-                const baseY = 90 + row * yGap;
-                const motion = this.getNodeMotion(node.id, index);
-                const x = baseX + motion.dx;
-                const y = baseY + motion.dy;
+                const state = this.ensureNodeState(node.id, index);
+                const x = state.x;
+                const y = state.y;
                 const inChannel = this.channelNodeSet.size === 0 || this.channelNodeSet.has(node.id);
 
                 let roleLabel = node.status || 'unknown';
@@ -415,23 +419,43 @@ const NetworkGraph = {
         },
 
         startPan(event) {
-            this.panning = true;
+            const world = this.toWorldPoint(event);
+            this.pointerPush.active = true;
+            this.pointerPush.x = world.x;
+            this.pointerPush.y = world.y;
+            this.pointerPush.impulse = 1.0;
+
+            this.pushing = event.button === 0 && !event.shiftKey;
+            this.panning = !this.pushing;
             this.lastMouseX = event.clientX;
             this.lastMouseY = event.clientY;
         },
 
         onPan(event) {
-            if (!this.panning) return;
             const dx = event.clientX - this.lastMouseX;
             const dy = event.clientY - this.lastMouseY;
-            this.panX += dx;
-            this.panY += dy;
+
+            if (this.panning) {
+                this.panX += dx;
+                this.panY += dy;
+            }
+
+            if (this.pushing) {
+                const world = this.toWorldPoint(event);
+                this.pointerPush.active = true;
+                this.pointerPush.x = world.x;
+                this.pointerPush.y = world.y;
+                this.pointerPush.impulse = Math.min(1.8, 1 + Math.hypot(dx, dy) / 32);
+            }
+
             this.lastMouseX = event.clientX;
             this.lastMouseY = event.clientY;
         },
 
         endPan() {
             this.panning = false;
+            this.pushing = false;
+            this.pointerPush.active = false;
         },
 
         zoomIn() {
@@ -453,7 +477,11 @@ const NetworkGraph = {
             this.animTimer = setInterval(() => {
                 this.animPhase += 0.04;
                 if (this.animPhase > 1000) this.animPhase = 0;
-                this.frameNow = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+                const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+                const dt = Math.max(0.008, Math.min(0.05, (now - this.lastFrameNow) / 1000));
+                this.lastFrameNow = now;
+                this.stepPhysics(dt);
+                this.frameNow = now;
             }, 33);
         },
 
@@ -471,6 +499,157 @@ const NetworkGraph = {
             return {
                 dx: Math.cos(phase) * amp,
                 dy: Math.sin(phase * 0.8) * amp * 0.6,
+            };
+        },
+
+        syncPhysicsNodes(nodes) {
+            const keep = new Set();
+            nodes.forEach((node, index) => {
+                keep.add(node.id);
+                this.ensureNodeState(node.id, index);
+            });
+            for (const id in this.physicsNodes) {
+                if (!keep.has(id)) delete this.physicsNodes[id];
+            }
+        },
+
+        ensureNodeState(nodeId, index = 0) {
+            if (this.physicsNodes[nodeId]) return this.physicsNodes[nodeId];
+            const seed = this.hashNode(nodeId) + index * 97;
+            const minX = 90;
+            const maxX = 1110;
+            const minY = 80;
+            const maxY = 720;
+            const spanX = maxX - minX;
+            const spanY = maxY - minY;
+            const randX = minX + (seed % 1000) / 1000 * spanX;
+            const randY = minY + ((seed * 31) % 1000) / 1000 * spanY;
+            const state = {
+                x: randX,
+                y: randY,
+                vx: 0,
+                vy: 0,
+                anchorX: randX,
+                anchorY: randY,
+            };
+            this.physicsNodes[nodeId] = state;
+            return state;
+        },
+
+        stepPhysics(dt) {
+            const nodes = this.topology.nodes || [];
+            if (nodes.length === 0) return;
+
+            this.syncPhysicsNodes(nodes);
+
+            const states = nodes.map((node, idx) => ({
+                id: node.id,
+                s: this.ensureNodeState(node.id, idx),
+                fx: 0,
+                fy: 0,
+            }));
+            const byId = new Map(states.map(v => [v.id, v]));
+            const dtN = Math.max(0.45, Math.min(1.35, dt * 42));
+
+            // Repulsion to keep nodes separated and create a mesh look.
+            const repel = this.mini ? 5200 : 9000;
+            for (let i = 0; i < states.length; i++) {
+                for (let j = i + 1; j < states.length; j++) {
+                    const a = states[i];
+                    const b = states[j];
+                    let dx = b.s.x - a.s.x;
+                    let dy = b.s.y - a.s.y;
+                    const d2 = Math.max(90, dx * dx + dy * dy);
+                    const d = Math.sqrt(d2);
+                    if (d < 0.001) {
+                        dx = 1;
+                        dy = 0;
+                    }
+                    const f = repel / d2;
+                    const fx = (dx / d) * f;
+                    const fy = (dy / d) * f;
+                    a.fx -= fx;
+                    a.fy -= fy;
+                    b.fx += fx;
+                    b.fy += fy;
+                }
+            }
+
+            // Spring links on current topology edges.
+            const spring = this.mini ? 0.006 : 0.009;
+            const restLen = this.mini ? 150 : 210;
+            for (const edge of (this.topology.edges || [])) {
+                const a = byId.get(edge.source);
+                const b = byId.get(edge.target);
+                if (!a || !b) continue;
+                const dx = b.s.x - a.s.x;
+                const dy = b.s.y - a.s.y;
+                const d = Math.max(1, Math.hypot(dx, dy));
+                const stretch = d - restLen;
+                const f = stretch * spring;
+                const fx = (dx / d) * f;
+                const fy = (dy / d) * f;
+                a.fx += fx;
+                a.fy += fy;
+                b.fx -= fx;
+                b.fy -= fy;
+            }
+
+            // Pull nodes gently toward deterministic random anchors so the
+            // long-term layout remains mesh-like and irregular (not circular).
+            for (const n of states) {
+                n.fx += (n.s.anchorX - n.s.x) * 0.0032;
+                n.fy += (n.s.anchorY - n.s.y) * 0.0032;
+            }
+
+            // Direct interaction: pointer pushes nearby nodes away.
+            if (this.pointerPush.active) {
+                const r = this.mini ? 140 : 190;
+                const impulse = (this.pointerPush.impulse || 1) * (this.mini ? 0.8 : 1.0);
+                for (const n of states) {
+                    const dx = n.s.x - this.pointerPush.x;
+                    const dy = n.s.y - this.pointerPush.y;
+                    const d = Math.max(1, Math.hypot(dx, dy));
+                    if (d > r) continue;
+                    const t = 1 - (d / r);
+                    const push = t * t * impulse * 2.3;
+                    n.s.vx += (dx / d) * push;
+                    n.s.vy += (dy / d) * push;
+                }
+                this.pointerPush.impulse = Math.max(1, this.pointerPush.impulse * 0.92);
+            }
+
+            // Integrate and confine.
+            const damping = this.mini ? 0.9 : 0.93;
+            for (const n of states) {
+                n.s.vx = (n.s.vx + n.fx * dtN) * damping;
+                n.s.vy = (n.s.vy + n.fy * dtN) * damping;
+                n.s.x += n.s.vx * dtN;
+                n.s.y += n.s.vy * dtN;
+
+                const minX = 50;
+                const maxX = 1150;
+                const minY = 50;
+                const maxY = 750;
+
+                if (n.s.x < minX) { n.s.x = minX; n.s.vx *= -0.35; }
+                if (n.s.x > maxX) { n.s.x = maxX; n.s.vx *= -0.35; }
+                if (n.s.y < minY) { n.s.y = minY; n.s.vy *= -0.35; }
+                if (n.s.y > maxY) { n.s.y = maxY; n.s.vy *= -0.35; }
+            }
+        },
+
+        toWorldPoint(event) {
+            const svg = this.$refs.graphSvg;
+            if (!svg) return { x: 600, y: 400 };
+            const rect = svg.getBoundingClientRect();
+            const viewW = 1200;
+            const viewH = 800;
+            const sx = (event.clientX - rect.left) * (viewW / Math.max(1, rect.width));
+            const sy = (event.clientY - rect.top) * (viewH / Math.max(1, rect.height));
+            return {
+                x: (sx - this.panX) / this.scale,
+                y: (sy - this.panY) / this.scale,
             };
         },
 

@@ -495,7 +495,7 @@ class ElectionManager:
 
         new_seq_addr = candidates[0]
         next_seq_num = last_seq + 1
-
+        print(candidates)
         logger.info(
             "[Election/%s] Elected new sequencer: %s (next_seq=%d)",
             self._channel,
