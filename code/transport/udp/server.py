@@ -192,23 +192,15 @@ class UDPServer:
         )
         election_mgr.load_state()
         self._election_managers[channel] = election_mgr
+        core_mgr.set_view_number_provider(lambda em=election_mgr: em.current_view)
 
         # Register core manager with engine
         self.engine.register_core_manager(channel, core_mgr)
 
-        # Try to discover the sequencer
-        seq_addr = election_mgr.sequencer_address
+        # Always discover current sequencer at startup.
+        persisted_seq_addr = election_mgr.sequencer_address
 
-        if seq_addr:
-            # We have a persisted sequencer — use it
-            logger.info(
-                "[UDPServer] Channel '%s': using persisted sequencer %s",
-                channel, seq_addr,
-            )
-            self._activate_sequencer(channel, seq_addr, election_mgr.last_known_seq + 1)
-            return
-
-        # No persisted state — broadcast FIND_SEQUENCER_REQUEST
+        # Broadcast FIND_SEQUENCER_REQUEST
         logger.info(
             "[UDPServer] Channel '%s': broadcasting FIND_SEQUENCER_REQUEST",
             channel,
@@ -265,14 +257,31 @@ class UDPServer:
             if seq_addr:
                 logger.info(
                     "[UDPServer] Channel '%s': discovered sequencer %s",
-                    channel, seq_addr,
+                    channel,
+                    seq_addr,
                 )
                 election_mgr.set_sequencer(seq_addr)
                 if core_list:
                     core_mgr.set_initial_core(core_list)
                     self.engine.update_core_nodes_from_manager(channel)
-                self._activate_sequencer(channel, seq_addr, election_mgr.last_known_seq + 1)
+                self._activate_sequencer(
+                    channel, seq_addr, election_mgr.last_known_seq + 1
+                )
                 return
+
+        # Discovery failed: fall back to persisted sequencer if available.
+        if persisted_seq_addr:
+            logger.info(
+                "[UDPServer] Channel '%s': discovery timeout, using persisted sequencer %s",
+                channel,
+                persisted_seq_addr,
+            )
+            self._activate_sequencer(
+                channel,
+                persisted_seq_addr,
+                election_mgr.last_known_seq + 1,
+            )
+            return
 
         # No response — self-elect as sequencer (first node in network)
         logger.info(
@@ -284,17 +293,13 @@ class UDPServer:
         self.engine.update_core_nodes_from_manager(channel)
         self._activate_sequencer(channel, self.node.address, 1)
 
-    def _activate_sequencer(
-        self, channel: str, seq_addr: str, next_seq: int
-    ) -> None:
+    def _activate_sequencer(self, channel: str, seq_addr: str, next_seq: int) -> None:
         """Wire up the sequencer (local or remote) for a channel."""
         try:
             host, port_str = seq_addr.rsplit(":", 1)
             seq_info = NodeInfo.from_address(host, int(port_str))
         except (ValueError, AttributeError):
-            logger.error(
-                "[UDPServer] Invalid sequencer address: %s", seq_addr
-            )
+            logger.error("[UDPServer] Invalid sequencer address: %s", seq_addr)
             return
 
         election_mgr = self._election_managers.get(channel)
@@ -303,7 +308,10 @@ class UDPServer:
         if seq_info.node_id == self.node.node_id:
             # WE are the sequencer
             sequencer = ChannelSequencer(
-                channel, self.node, self._send_fn, store=self.store,
+                channel,
+                self.node,
+                self._send_fn,
+                store=self.store,
             )
             sequencer.load_state()
             # Ensure seq counter is at least next_seq - 1
@@ -317,7 +325,8 @@ class UDPServer:
                 election_mgr.start_sequencer_heartbeat(sequencer)
             logger.info(
                 "[UDPServer] Channel '%s': WE are the sequencer (seq=%d)",
-                channel, sequencer.current_seq,
+                channel,
+                sequencer.current_seq,
             )
         else:
             # Remote sequencer
@@ -329,20 +338,21 @@ class UDPServer:
                 election_mgr.start_sequencer_checker()
             logger.info(
                 "[UDPServer] Channel '%s': remote sequencer at %s",
-                channel, seq_addr,
+                channel,
+                seq_addr,
             )
 
     # ------------------------------------------------------------------
     # Callback: new sequencer elected or discovered
     # ------------------------------------------------------------------
 
-    def _on_new_sequencer(
-        self, channel: str, address: str, next_seq: int
-    ) -> None:
+    def _on_new_sequencer(self, channel: str, address: str, next_seq: int) -> None:
         """Callback from ElectionManager when a new sequencer is elected."""
         logger.info(
             "[UDPServer] New sequencer for '%s': %s (next_seq=%d)",
-            channel, address, next_seq,
+            channel,
+            address,
+            next_seq,
         )
 
         # Stop any running sequencer heartbeat/checker
@@ -440,11 +450,13 @@ class UDPServer:
         elif msg.msg_type == MessageType.CORE_JOIN_APPROVED:
             channel = msg.channel
             mgr = self._core_managers.get(channel)
+            em = self._election_managers.get(channel)
+            if em and not em.is_message_view_acceptable(msg):
+                return
             if mgr:
                 mgr.handle_join_approved(msg)
                 self.engine.update_core_nodes_from_manager(channel)
                 # If we just became core, start sequencer checker
-                em = self._election_managers.get(channel)
                 if em and mgr.is_core and not em.is_sequencer:
                     em.start_sequencer_checker()
             # Forward via gossip
@@ -453,6 +465,9 @@ class UDPServer:
         elif msg.msg_type == MessageType.CORE_LEAVE:
             channel = msg.channel
             mgr = self._core_managers.get(channel)
+            em = self._election_managers.get(channel)
+            if em and not em.is_message_view_acceptable(msg):
+                return
             if mgr:
                 mgr.handle_core_leave(msg)
                 self.engine.update_core_nodes_from_manager(channel)
@@ -472,11 +487,14 @@ class UDPServer:
                 em.handle_election_request(msg, sender_info)
 
         elif msg.msg_type == MessageType.NEW_SEQUENCER:
+
             channel = msg.channel
             em = self._election_managers.get(channel)
+            accepted = False
             if em:
-                em.handle_new_sequencer(msg)
-            self._forward_control_msg(msg, sender_info)
+                accepted = em.handle_new_sequencer(msg)
+            if accepted:
+                self._forward_control_msg(msg, sender_info)
 
         # --- Sequencer discovery ---
         elif msg.msg_type == MessageType.FIND_SEQUENCER_REQUEST:
@@ -495,7 +513,8 @@ class UDPServer:
 
         elif msg.msg_type in (MessageType.JOIN, MessageType.LEAVE):
             logger.debug(
-                "[UDPServer] Received %s from %s", msg.msg_type.name,
+                "[UDPServer] Received %s from %s",
+                msg.msg_type.name,
                 sender_info.node_id[:8] if sender_info else "unknown",
             )
 
@@ -591,6 +610,7 @@ class UDPServer:
         if self.config.monitor.enabled:
             try:
                 from components.status_reporter import StatusReporter
+
                 self.status_reporter = StatusReporter(
                     node=self.node,
                     send_fn=self._send_fn,
@@ -609,7 +629,7 @@ class UDPServer:
 
     def stop(self) -> None:
         """Gracefully shut down all components. Safe to call multiple times."""
-        if getattr(self, '_stopped', False):
+        if getattr(self, "_stopped", False):
             return
         self._stopped = True
         logger.info("[UDPServer] Stopping node %s", self.node.address)
@@ -629,10 +649,16 @@ class UDPServer:
 
         # Persist state to disk
         if self.store:
-            self.store.save_neighbours([
-                {"node_id": e.info.node_id, "host": e.info.host, "port": e.info.port}
-                for e in self.node.all_neighbours()
-            ])
+            self.store.save_neighbours(
+                [
+                    {
+                        "node_id": e.info.node_id,
+                        "host": e.info.host,
+                        "port": e.info.port,
+                    }
+                    for e in self.node.all_neighbours()
+                ]
+            )
             for ch, buf in self.engine.delivery_buffers.items():
                 self.store.save_channel_state(
                     ch, buf.last_delivered_seq, self.node.is_subscribed(ch)

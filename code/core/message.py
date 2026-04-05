@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 # Lamport Clock
 # ---------------------------------------------------------------------------
 
+
 class LamportClock:
     """
     Thread-safe Lamport logical clock.
@@ -81,46 +82,47 @@ class LamportClock:
 # Message Types
 # ---------------------------------------------------------------------------
 
+
 class MessageType(Enum):
     # Application-level gossip message
-    GOSSIP        = auto()
+    GOSSIP = auto()
 
     # Heartbeat protocol (C3b)
-    HEARTBEAT     = auto()
+    HEARTBEAT = auto()
     HEARTBEAT_ACK = auto()
 
     # Peer discovery protocol (C1)
-    PEER_LIST_REQUEST  = auto()   # "Give me your known peers"
-    PEER_LIST_RESPONSE = auto()   # Response with list of peer dicts
+    PEER_LIST_REQUEST = auto()  # "Give me your known peers"
+    PEER_LIST_RESPONSE = auto()  # Response with list of peer dicts
 
     # Control / management
-    JOIN          = auto()
-    LEAVE         = auto()
+    JOIN = auto()
+    LEAVE = auto()
 
     # Total order — sequencing
-    SEQUENCE_ASSIGN     = auto()  # Sequencer → network: assigns seq_num to a message
-    SEQUENCER_ANNOUNCE  = auto()  # Sequencer announces itself for a channel
+    SEQUENCE_ASSIGN = auto()  # Sequencer → network: assigns seq_num to a message
+    SEQUENCER_ANNOUNCE = auto()  # Sequencer announces itself for a channel
 
     # History recovery
-    HISTORY_REQUEST     = auto()  # Node → core: request messages [from_seq..to_seq]
-    HISTORY_RESPONSE    = auto()  # Core → node: batch of sequenced messages
+    HISTORY_REQUEST = auto()  # Node → core: request messages [from_seq..to_seq]
+    HISTORY_RESPONSE = auto()  # Core → node: batch of sequenced messages
 
     # Monitoring
-    STATUS_REPORT       = auto()  # Node → monitor: periodic status payload
-    STATUS_REQUEST      = auto()  # Monitor → node: request immediate status
+    STATUS_REPORT = auto()  # Node → monitor: periodic status payload
+    STATUS_REQUEST = auto()  # Monitor → node: request immediate status
 
     # Dynamic core nodes
-    CORE_JOIN_REQUEST   = auto()  # Node → Sequencer: request to join core group
-    CORE_JOIN_APPROVED  = auto()  # Sequencer → all: new core node announcement
-    CORE_LEAVE          = auto()  # Core node → all: leaving core group (gap detected)
+    CORE_JOIN_REQUEST = auto()  # Node → Sequencer: request to join core group
+    CORE_JOIN_APPROVED = auto()  # Sequencer → all: new core node announcement
+    CORE_LEAVE = auto()  # Core node → all: leaving core group (gap detected)
 
     # Dynamic sequencer election
-    ELECTION_REQUEST    = auto()  # Core node → core nodes: sequencer suspected dead
-    NEW_SEQUENCER       = auto()  # Core nodes → all: new sequencer elected
+    ELECTION_REQUEST = auto()  # Core node → core nodes: sequencer suspected dead
+    NEW_SEQUENCER = auto()  # Core nodes → all: new sequencer elected
     SEQUENCER_HEARTBEAT = auto()  # Sequencer → core nodes: fast heartbeat with last_seq
 
     # Sequencer discovery (bootstrap)
-    FIND_SEQUENCER_REQUEST  = auto()  # Node → broadcast: who is the sequencer?
+    FIND_SEQUENCER_REQUEST = auto()  # Node → broadcast: who is the sequencer?
     FIND_SEQUENCER_RESPONSE = auto()  # Any node → requester: sequencer info
 
 
@@ -128,15 +130,17 @@ class MessageType(Enum):
 # Node status (used in heartbeat neighbour table)
 # ---------------------------------------------------------------------------
 
+
 class NodeStatus(Enum):
-    ALIVE    = "alive"
-    SUSPECT  = "suspect"
-    DEAD     = "dead"
+    ALIVE = "alive"
+    SUSPECT = "suspect"
+    DEAD = "dead"
 
 
 # ---------------------------------------------------------------------------
 # Message
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Message:
@@ -155,15 +159,15 @@ class Message:
       metadata   : extensible dict for additional fields (e.g. TTL, hop count)
     """
 
-    msg_id:     str
-    msg_type:   MessageType
-    sender_id:  str
-    timestamp:  float
+    msg_id: str
+    msg_type: MessageType
+    sender_id: str
+    timestamp: float
     lamport_ts: int
-    counter:    int
-    channel:    str
-    content:    Any                          = None
-    metadata:   Dict[str, Any]              = field(default_factory=dict)
+    counter: int
+    channel: str
+    content: Any = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Serialisation helpers
@@ -223,6 +227,7 @@ class Message:
 # Out-of-Order Buffer
 # ---------------------------------------------------------------------------
 
+
 class OutOfOrderBuffer:
     """
     Per-sender buffer that enforces total-order delivery using Lamport
@@ -272,7 +277,7 @@ class OutOfOrderBuffer:
     ) -> None:
         self._deliver = deliver_callback
         self._max_buf = max_buffer_size
-        self._lock    = threading.Lock()
+        self._lock = threading.Lock()
 
         # next expected counter per sender_id
         self._next_expected: Dict[str, int] = {}
@@ -300,7 +305,7 @@ class OutOfOrderBuffer:
             # Initialise state for a new sender on first contact
             if sender not in self._next_expected:
                 self._next_expected[sender] = 1
-                self._pending[sender]       = []
+                self._pending[sender] = []
 
             expected = self._next_expected[sender]
 
@@ -371,6 +376,7 @@ class OutOfOrderBuffer:
 # Message Factory
 # ---------------------------------------------------------------------------
 
+
 class MessageFactory:
     """
     Stamps outgoing messages with Lamport clock values and sequence numbers.
@@ -379,7 +385,7 @@ class MessageFactory:
 
     def __init__(self, node_id: str, clock: LamportClock) -> None:
         self.node_id = node_id
-        self.clock   = clock
+        self.clock = clock
         self._counter_lock = threading.Lock()
         self._counter: int = 0
 
@@ -397,19 +403,21 @@ class MessageFactory:
     ) -> Message:
         lamport_ts = self.clock.send()
         return Message(
-            msg_id     = uuid.uuid4().hex,
-            msg_type   = msg_type,
-            sender_id  = self.node_id,
-            timestamp  = time.time(),
-            lamport_ts = lamport_ts,
-            counter    = self._next_counter(),
-            channel    = channel,
-            content    = content,
-            metadata   = metadata or {},
+            msg_id=uuid.uuid4().hex,
+            msg_type=msg_type,
+            sender_id=self.node_id,
+            timestamp=time.time(),
+            lamport_ts=lamport_ts,
+            counter=self._next_counter(),
+            channel=channel,
+            content=content,
+            metadata=metadata or {},
         )
 
     def gossip(self, channel: str, content: Any, **meta) -> Message:
-        return self.create(MessageType.GOSSIP, channel=channel, content=content, metadata=meta)
+        return self.create(
+            MessageType.GOSSIP, channel=channel, content=content, metadata=meta
+        )
 
     def heartbeat(self) -> Message:
         return self.create(MessageType.HEARTBEAT)
@@ -449,9 +457,7 @@ class MessageFactory:
             channel=channel,
         )
 
-    def history_request(
-        self, channel: str, from_seq: int, to_seq: int = -1
-    ) -> Message:
+    def history_request(self, channel: str, from_seq: int, to_seq: int = -1) -> Message:
         """Request sequenced messages in range [from_seq, to_seq] from a core node."""
         return self.create(
             MessageType.HISTORY_REQUEST,
@@ -478,33 +484,48 @@ class MessageFactory:
         return self.create(MessageType.CORE_JOIN_REQUEST, channel=channel)
 
     def core_join_approved(
-        self, channel: str, new_core_address: str, core_list: List[str]
+        self,
+        channel: str,
+        new_core_address: str,
+        core_list: List[str],
+        view_number: Optional[int] = None,
     ) -> Message:
         """Announce a new core node to the entire network."""
         return self.create(
             MessageType.CORE_JOIN_APPROVED,
             channel=channel,
             content={"new_core_address": new_core_address, "core_list": core_list},
+            metadata={"view_number": view_number} if view_number is not None else None,
         )
 
     def core_leave(
-        self, channel: str, leaving_address: str, core_list: List[str]
+        self,
+        channel: str,
+        leaving_address: str,
+        core_list: List[str],
+        view_number: Optional[int] = None,
     ) -> Message:
         """Announce departure from the core group."""
         return self.create(
             MessageType.CORE_LEAVE,
             channel=channel,
             content={"leaving_address": leaving_address, "core_list": core_list},
+            metadata={"view_number": view_number} if view_number is not None else None,
         )
 
     # --- Dynamic sequencer election ---
 
-    def election_request(self, channel: str, last_known_seq: int) -> Message:
+    def election_request(
+        self, channel: str, last_known_seq: int, view_number: Optional[int] = None
+    ) -> Message:
         """Request an election because the sequencer is suspected dead."""
+        metadata = {"last_known_seq": last_known_seq}
+        if view_number is not None:
+            metadata["view_number"] = view_number
         return self.create(
             MessageType.ELECTION_REQUEST,
             channel=channel,
-            metadata={"last_known_seq": last_known_seq},
+            metadata=metadata,
         )
 
     def new_sequencer(
@@ -513,16 +534,20 @@ class MessageFactory:
         sequencer_address: str,
         next_seq_num: int,
         core_list: List[str],
+        view_number: Optional[int] = None,
     ) -> Message:
         """Announce the newly elected sequencer."""
+        content = {
+            "sequencer_address": sequencer_address,
+            "next_seq_num": next_seq_num,
+            "core_list": core_list,
+        }
+        if view_number is not None:
+            content["view_number"] = view_number
         return self.create(
             MessageType.NEW_SEQUENCER,
             channel=channel,
-            content={
-                "sequencer_address": sequencer_address,
-                "next_seq_num": next_seq_num,
-                "core_list": core_list,
-            },
+            content=content,
         )
 
     def sequencer_heartbeat(self, channel: str, last_seq: int) -> Message:
@@ -540,11 +565,18 @@ class MessageFactory:
         return self.create(MessageType.FIND_SEQUENCER_REQUEST, channel=channel)
 
     def find_sequencer_response(
-        self, channel: str, sequencer_address: str, core_list: List[str]
+        self,
+        channel: str,
+        sequencer_address: str,
+        core_list: List[str],
+        view_number: Optional[int] = None,
     ) -> Message:
         """Response with current sequencer info."""
+        content = {"sequencer_address": sequencer_address, "core_list": core_list}
+        if view_number is not None:
+            content["view_number"] = view_number
         return self.create(
             MessageType.FIND_SEQUENCER_RESPONSE,
             channel=channel,
-            content={"sequencer_address": sequencer_address, "core_list": core_list},
+            content=content,
         )

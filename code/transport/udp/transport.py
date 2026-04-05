@@ -11,8 +11,10 @@ messages to a user-supplied on_message callback.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import threading
+import time
 from typing import Optional
 
 from core.node import NodeInfo
@@ -21,6 +23,17 @@ from transport.base import TransportBase, OnMessageFn
 from config.udp_config import UDPConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _is_windows_udp_connreset(exc: OSError) -> bool:
+    """Windows may raise WSAECONNRESET on UDP recv after sending to a closed port."""
+    return os.name == "nt" and getattr(exc, "winerror", None) == 10054
+
+
+def _is_expected_socket_close(exc: OSError) -> bool:
+    """Socket was closed while recv loop was active (normal during shutdown)."""
+    winerror = getattr(exc, "winerror", None)
+    return winerror in {10038} or exc.errno in {9}
 
 
 class UDPTransport(TransportBase):
@@ -64,20 +77,26 @@ class UDPTransport(TransportBase):
         if len(payload) > self.config.max_datagram_size:
             logger.warning(
                 "[UDPTransport] Message too large (%d > %d), sending anyway",
-                len(payload), self.config.max_datagram_size,
+                len(payload),
+                self.config.max_datagram_size,
             )
 
         try:
             self._sock.sendto(payload, (peer.host, peer.port))
             logger.debug(
                 "[UDPTransport] Sent %s to %s:%d (%d bytes)",
-                msg.msg_type.name, peer.host, peer.port, len(payload),
+                msg.msg_type.name,
+                peer.host,
+                peer.port,
+                len(payload),
             )
             return True
         except OSError as exc:
             logger.warning(
                 "[UDPTransport] Send to %s:%d failed: %s",
-                peer.host, peer.port, exc,
+                peer.host,
+                peer.port,
+                exc,
             )
             return False
 
@@ -94,6 +113,15 @@ class UDPTransport(TransportBase):
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # On Windows, UDP recv can surface ICMP port-unreachable as a fatal
+        # WSAECONNRESET unless this ioctl is disabled.
+        if os.name == "nt" and hasattr(socket, "SIO_UDP_CONNRESET"):
+            try:
+                self._sock.ioctl(socket.SIO_UDP_CONNRESET, 0)
+            except Exception:
+                logger.debug("[UDPTransport] Failed to disable SIO_UDP_CONNRESET")
+
         self._sock.settimeout(self.config.socket_timeout)
         self._sock.bind((self.host, self.port))
 
@@ -113,10 +141,18 @@ class UDPTransport(TransportBase):
                 data, addr = self._sock.recvfrom(self.config.recv_buffer_size)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as exc:
+                if _is_windows_udp_connreset(exc):
+                    logger.debug("[UDPTransport] Ignoring expected UDP reset: %s", exc)
+                    continue
+                if not self._running or _is_expected_socket_close(exc):
+                    break
                 if self._running:
-                    logger.exception("[UDPTransport] Socket error")
-                break
+                    logger.warning(
+                        "[UDPTransport] Socket recv error (continuing): %s", exc
+                    )
+                time.sleep(0.05)
+                continue
 
             # Parse message
             try:
@@ -124,7 +160,8 @@ class UDPTransport(TransportBase):
             except Exception as exc:
                 logger.warning(
                     "[UDPTransport] Failed to parse datagram from %s: %s",
-                    addr, exc,
+                    addr,
+                    exc,
                 )
                 continue
 
@@ -132,8 +169,12 @@ class UDPTransport(TransportBase):
             # Use msg.sender_id as the identity key so ID bookkeeping stays
             # consistent even when bind address differs (e.g., 0.0.0.0 vs 127.0.0.1).
             sender_host, sender_port = addr
-            sender_id = msg.sender_id or NodeInfo.from_address(sender_host, sender_port).node_id
-            sender_info = NodeInfo(node_id=sender_id, host=sender_host, port=sender_port)
+            sender_id = (
+                msg.sender_id or NodeInfo.from_address(sender_host, sender_port).node_id
+            )
+            sender_info = NodeInfo(
+                node_id=sender_id, host=sender_host, port=sender_port
+            )
 
             # Dispatch
             if self._on_message:
@@ -141,7 +182,8 @@ class UDPTransport(TransportBase):
                     self._on_message(msg, sender_info)
                 except Exception as exc:
                     logger.error(
-                        "[UDPTransport] on_message handler error: %s", exc,
+                        "[UDPTransport] on_message handler error: %s",
+                        exc,
                     )
 
     # ------------------------------------------------------------------

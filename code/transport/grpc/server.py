@@ -120,15 +120,21 @@ class GRPCServer:
 
     def _bootstrap_channel(self, channel: str, ch_cfg: ChannelConfig) -> None:
         core_mgr = CoreNodeManager(
-            channel=channel, node=self.node, send_fn=self._send_fn,
-            store=self.store, core_join_min_seq=ch_cfg.core_join_min_seq,
+            channel=channel,
+            node=self.node,
+            send_fn=self._send_fn,
+            store=self.store,
+            core_join_min_seq=ch_cfg.core_join_min_seq,
         )
         core_mgr.load_state()
         self._core_managers[channel] = core_mgr
 
         election_mgr = ElectionManager(
-            channel=channel, node=self.node, send_fn=self._send_fn,
-            core_manager=core_mgr, store=self.store,
+            channel=channel,
+            node=self.node,
+            send_fn=self._send_fn,
+            core_manager=core_mgr,
+            store=self.store,
             on_new_sequencer=self._on_new_sequencer,
             sequencer_heartbeat_interval=ch_cfg.sequencer_heartbeat_interval,
             sequencer_heartbeat_timeout=ch_cfg.sequencer_heartbeat_timeout,
@@ -136,12 +142,10 @@ class GRPCServer:
         )
         election_mgr.load_state()
         self._election_managers[channel] = election_mgr
+        core_mgr.set_view_number_provider(lambda em=election_mgr: em.current_view)
         self.engine.register_core_manager(channel, core_mgr)
 
-        seq_addr = election_mgr.sequencer_address
-        if seq_addr:
-            self._activate_sequencer(channel, seq_addr, election_mgr.last_known_seq + 1)
-            return
+        persisted_seq_addr = election_mgr.sequencer_address
 
         # Broadcast FIND_SEQUENCER_REQUEST
         self._find_seq_responses[channel] = []
@@ -189,8 +193,19 @@ class GRPCServer:
                 if core_list:
                     core_mgr.set_initial_core(core_list)
                     self.engine.update_core_nodes_from_manager(channel)
-                self._activate_sequencer(channel, seq_addr, election_mgr.last_known_seq + 1)
+                self._activate_sequencer(
+                    channel, seq_addr, election_mgr.last_known_seq + 1
+                )
                 return
+
+        # Discovery failed: fall back to persisted sequencer if available.
+        if persisted_seq_addr:
+            self._activate_sequencer(
+                channel,
+                persisted_seq_addr,
+                election_mgr.last_known_seq + 1,
+            )
+            return
 
         # Self-elect
         election_mgr.set_sequencer(self.node.address, next_seq=1)
@@ -210,7 +225,10 @@ class GRPCServer:
 
         if seq_info.node_id == self.node.node_id:
             sequencer = ChannelSequencer(
-                channel, self.node, self._send_fn, store=self.store,
+                channel,
+                self.node,
+                self._send_fn,
+                store=self.store,
             )
             sequencer.load_state()
             if sequencer.current_seq < next_seq - 1:
@@ -270,16 +288,21 @@ class GRPCServer:
         elif msg.msg_type == MessageType.CORE_JOIN_APPROVED:
             ch = msg.channel
             mgr = self._core_managers.get(ch)
+            em = self._election_managers.get(ch)
+            if em and not em.is_message_view_acceptable(msg):
+                return
             if mgr:
                 mgr.handle_join_approved(msg)
                 self.engine.update_core_nodes_from_manager(ch)
-                em = self._election_managers.get(ch)
                 if em and mgr.is_core and not em.is_sequencer:
                     em.start_sequencer_checker()
             self._forward_control_msg(msg, sender_info)
         elif msg.msg_type == MessageType.CORE_LEAVE:
             ch = msg.channel
             mgr = self._core_managers.get(ch)
+            em = self._election_managers.get(ch)
+            if em and not em.is_message_view_acceptable(msg):
+                return
             if mgr:
                 mgr.handle_core_leave(msg)
                 self.engine.update_core_nodes_from_manager(ch)
@@ -295,9 +318,11 @@ class GRPCServer:
                 em.handle_election_request(msg, sender_info)
         elif msg.msg_type == MessageType.NEW_SEQUENCER:
             em = self._election_managers.get(msg.channel)
+            accepted = False
             if em:
-                em.handle_new_sequencer(msg)
-            self._forward_control_msg(msg, sender_info)
+                accepted = em.handle_new_sequencer(msg)
+            if accepted:
+                self._forward_control_msg(msg, sender_info)
 
         elif msg.msg_type == MessageType.FIND_SEQUENCER_REQUEST:
             em = self._election_managers.get(msg.channel)
@@ -310,7 +335,9 @@ class GRPCServer:
             if self.status_reporter:
                 self.status_reporter._report()
 
-    def _forward_control_msg(self, msg: Message, sender_info: Optional[NodeInfo]) -> None:
+    def _forward_control_msg(
+        self, msg: Message, sender_info: Optional[NodeInfo]
+    ) -> None:
         if not self.node.should_forward(msg.msg_id):
             return
         self.node.mark_seen(msg.msg_id)
@@ -379,8 +406,10 @@ class GRPCServer:
         if self.config.monitor.enabled:
             try:
                 from components.status_reporter import StatusReporter
+
                 self.status_reporter = StatusReporter(
-                    node=self.node, send_fn=self._send_fn,
+                    node=self.node,
+                    send_fn=self._send_fn,
                     monitor_address=self.config.monitor.monitor_address,
                     interval=self.config.monitor.report_interval,
                 )
@@ -409,10 +438,16 @@ class GRPCServer:
         self.transport.stop()
 
         if self.store:
-            self.store.save_neighbours([
-                {"node_id": e.info.node_id, "host": e.info.host, "port": e.info.port}
-                for e in self.node.all_neighbours()
-            ])
+            self.store.save_neighbours(
+                [
+                    {
+                        "node_id": e.info.node_id,
+                        "host": e.info.host,
+                        "port": e.info.port,
+                    }
+                    for e in self.node.all_neighbours()
+                ]
+            )
             for ch, buf in self.engine.delivery_buffers.items():
                 self.store.save_channel_state(
                     ch, buf.last_delivered_seq, self.node.is_subscribed(ch)

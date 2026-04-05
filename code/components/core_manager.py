@@ -67,11 +67,13 @@ class CoreNodeManager:
         self._core_addresses: List[str] = []  # sorted list of "host:port"
         self._is_core: bool = False
         self._join_requested: bool = False  # prevent duplicate requests
+        self._get_view_number: Callable[[], int] = lambda: 0
         self._lock = threading.Lock()
 
         logger.info(
             "[CoreMgr/%s] Initialised on node %s",
-            channel, node.node_id[:8],
+            channel,
+            node.node_id[:8],
         )
 
     # ------------------------------------------------------------------
@@ -116,7 +118,9 @@ class CoreNodeManager:
                 self._is_core = self._node.address in self._core_addresses
             logger.info(
                 "[CoreMgr/%s] Loaded %d core nodes from storage (is_core=%s)",
-                self._channel, len(self._core_addresses), self._is_core,
+                self._channel,
+                len(self._core_addresses),
+                self._is_core,
             )
 
     def save_state(self) -> None:
@@ -163,13 +167,15 @@ class CoreNodeManager:
             self._send_fn(sequencer_info, msg)
             logger.info(
                 "[CoreMgr/%s] Sent CORE_JOIN_REQUEST to sequencer %s",
-                self._channel, sequencer_info.node_id[:8],
+                self._channel,
+                sequencer_info.node_id[:8],
             )
             return True
         except Exception as exc:
             logger.warning(
                 "[CoreMgr/%s] Failed to send CORE_JOIN_REQUEST: %s",
-                self._channel, exc,
+                self._channel,
+                exc,
             )
             with self._lock:
                 self._join_requested = False
@@ -179,9 +185,7 @@ class CoreNodeManager:
     # Core join: handle request (called on SEQUENCER only)
     # ------------------------------------------------------------------
 
-    def handle_join_request(
-        self, msg: Message, sender_info: NodeInfo
-    ) -> None:
+    def handle_join_request(self, msg: Message, sender_info: NodeInfo) -> None:
         """
         Called on the SEQUENCER when a CORE_JOIN_REQUEST arrives.
         Approves the request and broadcasts CORE_JOIN_APPROVED.
@@ -192,7 +196,8 @@ class CoreNodeManager:
             if new_core_addr in self._core_addresses:
                 logger.debug(
                     "[CoreMgr/%s] %s already in core group",
-                    self._channel, new_core_addr,
+                    self._channel,
+                    new_core_addr,
                 )
                 return
 
@@ -202,12 +207,17 @@ class CoreNodeManager:
 
         logger.info(
             "[CoreMgr/%s] Approved core join for %s (total=%d)",
-            self._channel, new_core_addr, len(core_list),
+            self._channel,
+            new_core_addr,
+            len(core_list),
         )
 
         # Broadcast CORE_JOIN_APPROVED to all neighbours
         approved_msg = self._node.factory.core_join_approved(
-            self._channel, new_core_addr, core_list
+            self._channel,
+            new_core_addr,
+            core_list,
+            view_number=self._current_view_number(),
         )
         self._broadcast(approved_msg)
         self.save_state()
@@ -230,16 +240,16 @@ class CoreNodeManager:
             if new_core_addr == self._node.address:
                 self._is_core = True
                 self._join_requested = False
-                logger.info(
-                    "[CoreMgr/%s] WE are now a core node!", self._channel
-                )
+                logger.info("[CoreMgr/%s] WE are now a core node!", self._channel)
             elif self._node.address in self._core_addresses:
                 self._is_core = True
 
         self.save_state()
         logger.info(
             "[CoreMgr/%s] Updated core list: %d nodes (new: %s)",
-            self._channel, len(core_list), new_core_addr[:20],
+            self._channel,
+            len(core_list),
+            new_core_addr[:20],
         )
 
     # ------------------------------------------------------------------
@@ -258,16 +268,16 @@ class CoreNodeManager:
             self._core_addresses = sorted(core_list)
             if leaving_addr == self._node.address:
                 self._is_core = False
-                logger.info(
-                    "[CoreMgr/%s] WE left the core group", self._channel
-                )
+                logger.info("[CoreMgr/%s] WE left the core group", self._channel)
             elif self._node.address not in self._core_addresses:
                 self._is_core = False
 
         self.save_state()
         logger.info(
             "[CoreMgr/%s] Core node %s left (remaining=%d)",
-            self._channel, leaving_addr[:20], len(core_list),
+            self._channel,
+            leaving_addr[:20],
+            len(core_list),
         )
 
     # ------------------------------------------------------------------
@@ -301,11 +311,15 @@ class CoreNodeManager:
 
         logger.warning(
             "[CoreMgr/%s] Leaving core group (gap detected, pending=%d)",
-            self._channel, self._delivery_buffer.pending_count,
+            self._channel,
+            self._delivery_buffer.pending_count,
         )
 
         leave_msg = self._node.factory.core_leave(
-            self._channel, self._node.address, core_list
+            self._channel,
+            self._node.address,
+            core_list,
+            view_number=self._current_view_number(),
         )
         self._broadcast(leave_msg)
         self.save_state()
@@ -325,7 +339,9 @@ class CoreNodeManager:
         self.save_state()
         logger.info(
             "[CoreMgr/%s] Set initial core: %s (is_core=%s)",
-            self._channel, self._core_addresses, self._is_core,
+            self._channel,
+            self._core_addresses,
+            self._is_core,
         )
 
     # ------------------------------------------------------------------
@@ -335,9 +351,18 @@ class CoreNodeManager:
     def set_delivery_buffer(self, buf: "OrderedDeliveryBuffer") -> None:
         self._delivery_buffer = buf
 
+    def set_view_number_provider(self, provider: Callable[[], int]) -> None:
+        self._get_view_number = provider
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _current_view_number(self) -> int:
+        try:
+            return int(self._get_view_number())
+        except Exception:
+            return 0
 
     def _broadcast(self, msg: Message) -> None:
         """Send a message to all alive neighbours."""
@@ -347,5 +372,7 @@ class CoreNodeManager:
             except Exception as exc:
                 logger.debug(
                     "[CoreMgr/%s] Failed to send to %s: %s",
-                    self._channel, entry.info.node_id[:8], exc,
+                    self._channel,
+                    entry.info.node_id[:8],
+                    exc,
                 )
