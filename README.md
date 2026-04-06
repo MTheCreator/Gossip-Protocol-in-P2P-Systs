@@ -616,7 +616,7 @@ Core/seq status
 | Assumption | Basis |
 |:-----------|:------|
 | Asynchronous network | No message delay bound |
-| Crash-stop failures | No Byzantine behavior |
+| Crash-Recovery failures | No Byzantine behavior |
 | Partial connectivity | Overlay via discovery |
 | Bounded clock skew | Drift < delta_t |
 | Connected overlay | fmin + seed nodes |
